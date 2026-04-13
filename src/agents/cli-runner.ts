@@ -1,10 +1,14 @@
 import { formatErrorMessage } from "../infra/errors.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
+import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
 import { executePreparedCliRun } from "./cli-runner/execute.js";
 import { prepareCliRunContext } from "./cli-runner/prepare.js";
 import type { PreparedCliRunContext, RunCliAgentParams } from "./cli-runner/types.js";
 import { FailoverError, isFailoverError, resolveFailoverStatus } from "./failover-error.js";
 import { classifyFailoverReason, isFailoverErrorMessage } from "./pi-embedded-helpers.js";
 import type { EmbeddedPiRunResult } from "./pi-embedded-runner.js";
+
+const log = createSubsystemLogger("cli-runner");
 
 export async function runCliAgent(params: RunCliAgentParams): Promise<EmbeddedPiRunResult> {
   const context = await prepareCliRunContext(params);
@@ -15,17 +19,32 @@ export async function runPreparedCliAgent(
   context: PreparedCliRunContext,
 ): Promise<EmbeddedPiRunResult> {
   const { params } = context;
+  // Fire before_agent_start hook early so plugins record the turn start time
+  // before the CLI run begins (needed for accurate latency calculation).
+  fireCliBeforeAgentStart(params, context);
+
   const buildCliRunResult = (resultParams: {
     output: Awaited<ReturnType<typeof executePreparedCliRun>>;
     effectiveCliSessionId?: string;
   }): EmbeddedPiRunResult => {
     const text = resultParams.output.text?.trim();
     const payloads = text ? [{ text }] : undefined;
+    const durationMs = Date.now() - context.started;
+
+    // Fire llm_output + agent_end so cost-telemetry plugins (e.g. Blackbox)
+    // can track CLI-backed sessions the same way they track API-bridge sessions.
+    fireCliCompletionHooks({
+      params,
+      context,
+      output: resultParams.output,
+      text: text ?? "",
+      durationMs,
+    });
 
     return {
       payloads,
       meta: {
-        durationMs: Date.now() - context.started,
+        durationMs,
         systemPromptReport: context.systemPromptReport,
         agentMeta: {
           sessionId: resultParams.effectiveCliSessionId ?? params.sessionId ?? "",
@@ -125,4 +144,93 @@ export async function runClaudeCliAgent(
   params: RunClaudeCliAgentParams,
 ): Promise<EmbeddedPiRunResult> {
   return runCliAgent(buildRunClaudeCliAgentParams(params));
+}
+
+function buildCliAgentCtx(params: RunCliAgentParams, context: PreparedCliRunContext) {
+  return {
+    runId: params.runId,
+    agentId: params.agentId,
+    sessionKey: params.sessionKey,
+    sessionId: params.sessionId,
+    workspaceDir: params.workspaceDir,
+    modelProviderId: context.backendResolved.id,
+    modelId: context.modelId,
+    messageProvider: params.messageProvider,
+    trigger: "user" as const,
+    channelId: params.messageProvider,
+  };
+}
+
+/**
+ * Fire before_agent_start hook before the CLI run so plugins can record the
+ * turn start time (needed for accurate latency in cost telemetry).
+ * Fire-and-forget — failures are logged but never propagate.
+ */
+function fireCliBeforeAgentStart(params: RunCliAgentParams, context: PreparedCliRunContext): void {
+  const hookRunner = getGlobalHookRunner();
+  if (!hookRunner?.hasHooks("before_agent_start")) {
+    return;
+  }
+  hookRunner
+    .runBeforeAgentStart({ prompt: params.prompt }, buildCliAgentCtx(params, context))
+    .catch((err) => {
+      log.warn(`CLI before_agent_start hook failed: ${String(err)}`);
+    });
+}
+
+/**
+ * Fire llm_output + agent_end hooks after a CLI run completes so
+ * cost-telemetry plugins (e.g. Blackbox) receive the same events they get
+ * from API-bridge sessions.  Fire-and-forget — failures are logged but
+ * never propagate.
+ */
+function fireCliCompletionHooks(opts: {
+  params: RunCliAgentParams;
+  context: PreparedCliRunContext;
+  output: Awaited<ReturnType<typeof executePreparedCliRun>>;
+  text: string;
+  durationMs: number;
+}): void {
+  const hookRunner = getGlobalHookRunner();
+  if (!hookRunner) {
+    return;
+  }
+
+  const { params, context, output, text, durationMs } = opts;
+  const agentCtx = buildCliAgentCtx(params, context);
+
+  // llm_output — the critical hook for cost telemetry.
+  if (hookRunner.hasHooks("llm_output") && output.usage) {
+    hookRunner
+      .runLlmOutput(
+        {
+          runId: params.runId,
+          sessionId: params.sessionId,
+          provider: params.provider,
+          model: context.modelId,
+          assistantTexts: text ? [text] : [],
+          usage: output.usage,
+        },
+        agentCtx,
+      )
+      .catch((err) => {
+        log.warn(`CLI llm_output hook failed: ${String(err)}`);
+      });
+  }
+
+  // agent_end — finalizes the turn in telemetry plugins.
+  if (hookRunner.hasHooks("agent_end")) {
+    hookRunner
+      .runAgentEnd(
+        {
+          messages: [],
+          success: true,
+          durationMs,
+        },
+        agentCtx,
+      )
+      .catch((err) => {
+        log.warn(`CLI agent_end hook failed: ${String(err)}`);
+      });
+  }
 }

@@ -15,13 +15,13 @@ if (
 
 function resolveAssignments(id: string) {
   if (id === "irc") {
-    return ircSecrets.collectRuntimeConfigAssignments;
+    return ircSecrets!.collectRuntimeConfigAssignments;
   }
   if (id === "slack") {
-    return slackSecrets.collectRuntimeConfigAssignments;
+    return slackSecrets!.collectRuntimeConfigAssignments;
   }
   if (id === "googlechat") {
-    return googleChatSecrets.collectRuntimeConfigAssignments;
+    return googleChatSecrets!.collectRuntimeConfigAssignments;
   }
   return undefined;
 }

@@ -13,10 +13,7 @@
  */
 
 import { completeSimple, type TextContent } from "@mariozechner/pi-ai";
-import {
-  resolveDefaultAgentId,
-  resolveAgentDir,
-} from "../agents/agent-scope.js";
+import { resolveDefaultAgentId, resolveAgentDir } from "../agents/agent-scope.js";
 import { DEFAULT_PROVIDER } from "../agents/defaults.js";
 import { getApiKeyForModel, requireApiKey } from "../agents/model-auth.js";
 import { parseModelRef, resolveDefaultModelForAgent } from "../agents/model-selection.js";
@@ -47,7 +44,9 @@ function resolveSlugModel(cfg: OpenClawConfig): { provider: string; modelId: str
   const heartbeatModelRef = cfg?.agents?.defaults?.heartbeat?.model;
   if (heartbeatModelRef) {
     const parsed = parseModelRef(heartbeatModelRef, DEFAULT_PROVIDER);
-    return { provider: parsed.provider, modelId: parsed.model };
+    if (parsed) {
+      return { provider: parsed.provider, modelId: parsed.model };
+    }
   }
 
   // Fall back to agent primary
