@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { createRuntimeEnv } from "../../../test/helpers/plugins/runtime-env.js";
+import type { ClawdbotConfig, RuntimeEnv } from "../runtime-api.js";
 import {
+  FeishuRetryableCardActionError,
   handleFeishuCardAction,
   resetProcessedFeishuCardActionTokensForTests,
   type FeishuCardActionEvent,
@@ -33,8 +36,8 @@ vi.mock("./send.js", () => ({
 import { handleFeishuMessage } from "./bot.js";
 
 describe("Feishu Card Action Handler", () => {
-  const cfg = {} as any; // Minimal mock
-  const runtime = { log: vi.fn(), error: vi.fn() } as any;
+  const cfg: ClawdbotConfig = {};
+  const runtime: RuntimeEnv = createRuntimeEnv();
 
   function createCardActionEvent(params: {
     token: string;
@@ -86,6 +89,9 @@ describe("Feishu Card Action Handler", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(handleFeishuMessage)
+      .mockReset()
+      .mockResolvedValue(undefined as never);
     resetProcessedFeishuCardActionTokensForTests();
   });
 
@@ -193,6 +199,9 @@ describe("Feishu Card Action Handler", () => {
         to: "chat:chat1",
         accountId: "main",
         card: expect.objectContaining({
+          config: expect.objectContaining({
+            width_mode: "fill",
+          }),
           header: expect.objectContaining({
             title: expect.objectContaining({ content: "Confirm action" }),
           }),
@@ -218,6 +227,21 @@ describe("Feishu Card Action Handler", () => {
         }),
       }),
     );
+    const firstSendArg = (sendCardFeishuMock.mock.calls as unknown[][]).at(0)?.[0] as
+      | {
+          card?: {
+            config?: {
+              width_mode?: string;
+              wide_screen_mode?: boolean;
+              enable_forward?: boolean;
+            };
+          };
+        }
+      | undefined;
+    const sentCard = firstSendArg?.card;
+    expect(sentCard).toBeDefined();
+    expect(sentCard?.config?.wide_screen_mode).toBeUndefined();
+    expect(sentCard?.config?.enable_forward).toBeUndefined();
     expect(handleFeishuMessage).not.toHaveBeenCalled();
   });
 
@@ -343,7 +367,7 @@ describe("Feishu Card Action Handler", () => {
     expect(handleFeishuMessage).toHaveBeenCalledTimes(1);
   });
 
-  it("releases a claimed token when dispatch fails so retries can succeed", async () => {
+  it("keeps a claimed token completed after a non-retryable dispatch failure", async () => {
     const event = createStructuredQuickActionEvent({
       token: "tok11",
       action: "feishu.quick_actions.help",
@@ -354,6 +378,22 @@ describe("Feishu Card Action Handler", () => {
       .mockResolvedValueOnce(undefined as never);
 
     await expect(handleFeishuCardAction({ cfg, event, runtime })).rejects.toThrow("transient");
+    await handleFeishuCardAction({ cfg, event, runtime });
+
+    expect(handleFeishuMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases a claimed token for explicit retryable dispatch failures", async () => {
+    const event = createStructuredQuickActionEvent({
+      token: "tok11-retryable",
+      action: "feishu.quick_actions.help",
+      command: "/help",
+    });
+    vi.mocked(handleFeishuMessage)
+      .mockRejectedValueOnce(new FeishuRetryableCardActionError("retry me"))
+      .mockResolvedValueOnce(undefined as never);
+
+    await expect(handleFeishuCardAction({ cfg, event, runtime })).rejects.toThrow("retry me");
     await handleFeishuCardAction({ cfg, event, runtime });
 
     expect(handleFeishuMessage).toHaveBeenCalledTimes(2);

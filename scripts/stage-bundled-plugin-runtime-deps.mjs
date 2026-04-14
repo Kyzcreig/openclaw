@@ -1,9 +1,11 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-
-const WINDOWS_UNSAFE_CMD_CHARS_RE = /[&|<>^%\r\n]/;
+import semverSatisfies from "semver/functions/satisfies.js";
+import { resolveNpmRunner } from "./npm-runner.mjs";
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -15,6 +17,204 @@ function writeJson(filePath, value) {
 
 function removePathIfExists(targetPath) {
   fs.rmSync(targetPath, { recursive: true, force: true });
+}
+
+function makeTempDir(parentDir, prefix) {
+  return fs.mkdtempSync(path.join(parentDir, prefix));
+}
+
+function sanitizeTempPrefixSegment(value) {
+  const normalized = value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-+/g, "-");
+  return normalized.length > 0 ? normalized : "plugin";
+}
+
+function replaceDir(targetPath, sourcePath) {
+  removePathIfExists(targetPath);
+  try {
+    fs.renameSync(sourcePath, targetPath);
+    return;
+  } catch (error) {
+    if (error?.code !== "EXDEV") {
+      throw error;
+    }
+  }
+  fs.cpSync(sourcePath, targetPath, { recursive: true, force: true });
+  removePathIfExists(sourcePath);
+}
+
+function dependencyNodeModulesPath(nodeModulesDir, depName) {
+  return path.join(nodeModulesDir, ...depName.split("/"));
+}
+
+function readInstalledDependencyVersion(nodeModulesDir, depName) {
+  const packageJsonPath = path.join(
+    dependencyNodeModulesPath(nodeModulesDir, depName),
+    "package.json",
+  );
+  if (!fs.existsSync(packageJsonPath)) {
+    return null;
+  }
+  const version = readJson(packageJsonPath).version;
+  return typeof version === "string" ? version : null;
+}
+
+function dependencyVersionSatisfied(spec, installedVersion) {
+  return semverSatisfies(installedVersion, spec, { includePrerelease: false });
+}
+
+const defaultStagedRuntimeDepGlobalPruneSuffixes = [".d.ts", ".map"];
+const defaultStagedRuntimeDepPruneRules = new Map([
+  // Type declarations only; runtime resolves through lib/es entrypoints.
+  ["@larksuiteoapi/node-sdk", { paths: ["types"] }],
+  [
+    "@matrix-org/matrix-sdk-crypto-nodejs",
+    {
+      paths: ["index.d.ts", "README.md", "CHANGELOG.md", "RELEASING.md", ".node-version"],
+    },
+  ],
+  [
+    "@matrix-org/matrix-sdk-crypto-wasm",
+    {
+      paths: [
+        "index.d.ts",
+        "pkg/matrix_sdk_crypto_wasm.d.ts",
+        "pkg/matrix_sdk_crypto_wasm_bg.wasm.d.ts",
+        "README.md",
+      ],
+    },
+  ],
+  [
+    "matrix-js-sdk",
+    {
+      paths: ["src", "CHANGELOG.md", "CONTRIBUTING.rst", "README.md", "release.sh"],
+      suffixes: [".d.ts"],
+    },
+  ],
+  ["matrix-widget-api", { paths: ["src"], suffixes: [".d.ts"] }],
+  ["oidc-client-ts", { paths: ["README.md"], suffixes: [".d.ts"] }],
+  ["music-metadata", { paths: ["README.md"], suffixes: [".d.ts"] }],
+  ["@cloudflare/workers-types", { paths: ["."] }],
+  ["gifwrap", { paths: ["test"] }],
+  ["playwright-core", { paths: ["types"], suffixes: [".d.ts"] }],
+  ["@jimp/plugin-blit", { paths: ["src/__image_snapshots__"] }],
+  ["@jimp/plugin-blur", { paths: ["src/__image_snapshots__"] }],
+  ["@jimp/plugin-color", { paths: ["src/__image_snapshots__"] }],
+  ["@jimp/plugin-print", { paths: ["src/__image_snapshots__"] }],
+  ["@jimp/plugin-quantize", { paths: ["src/__image_snapshots__"] }],
+  ["@jimp/plugin-threshold", { paths: ["src/__image_snapshots__"] }],
+]);
+const runtimeDepsStagingVersion = 2;
+
+function resolveRuntimeDepPruneConfig(params = {}) {
+  return {
+    globalPruneSuffixes:
+      params.stagedRuntimeDepGlobalPruneSuffixes ?? defaultStagedRuntimeDepGlobalPruneSuffixes,
+    pruneRules: params.stagedRuntimeDepPruneRules ?? defaultStagedRuntimeDepPruneRules,
+  };
+}
+
+function collectInstalledRuntimeClosure(rootNodeModulesDir, dependencySpecs) {
+  const packageCache = new Map();
+  const closure = new Set();
+  const queue = Object.entries(dependencySpecs);
+
+  while (queue.length > 0) {
+    const [depName, spec] = queue.shift();
+    const installedVersion = readInstalledDependencyVersion(rootNodeModulesDir, depName);
+    if (installedVersion === null || !dependencyVersionSatisfied(spec, installedVersion)) {
+      return null;
+    }
+    if (closure.has(depName)) {
+      continue;
+    }
+
+    const packageJsonPath = path.join(
+      dependencyNodeModulesPath(rootNodeModulesDir, depName),
+      "package.json",
+    );
+    const packageJson = packageCache.get(depName) ?? readJson(packageJsonPath);
+    packageCache.set(depName, packageJson);
+    closure.add(depName);
+
+    for (const [childName, childSpec] of Object.entries(packageJson.dependencies ?? {})) {
+      queue.push([childName, childSpec]);
+    }
+    for (const [childName, childSpec] of Object.entries(packageJson.optionalDependencies ?? {})) {
+      queue.push([childName, childSpec]);
+    }
+  }
+
+  return [...closure];
+}
+
+function walkFiles(rootDir, visitFile) {
+  if (!fs.existsSync(rootDir)) {
+    return;
+  }
+  const queue = [rootDir];
+  while (queue.length > 0) {
+    const currentDir = queue.shift();
+    for (const entry of fs.readdirSync(currentDir, { withFileTypes: true })) {
+      const fullPath = path.join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        queue.push(fullPath);
+        continue;
+      }
+      if (entry.isFile()) {
+        visitFile(fullPath);
+      }
+    }
+  }
+}
+
+function pruneDependencyFilesBySuffixes(depRoot, suffixes) {
+  if (!suffixes || suffixes.length === 0 || !fs.existsSync(depRoot)) {
+    return;
+  }
+  walkFiles(depRoot, (fullPath) => {
+    if (suffixes.some((suffix) => fullPath.endsWith(suffix))) {
+      removePathIfExists(fullPath);
+    }
+  });
+}
+
+function pruneStagedInstalledDependencyCargo(nodeModulesDir, depName, pruneConfig) {
+  const depRoot = dependencyNodeModulesPath(nodeModulesDir, depName);
+  const pruneRule = pruneConfig.pruneRules.get(depName);
+  for (const relativePath of pruneRule?.paths ?? []) {
+    removePathIfExists(path.join(depRoot, relativePath));
+  }
+  pruneDependencyFilesBySuffixes(depRoot, pruneConfig.globalPruneSuffixes);
+  pruneDependencyFilesBySuffixes(depRoot, pruneRule?.suffixes ?? []);
+}
+
+function listInstalledDependencyNames(nodeModulesDir) {
+  if (!fs.existsSync(nodeModulesDir)) {
+    return [];
+  }
+  const names = [];
+  for (const entry of fs.readdirSync(nodeModulesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    if (entry.name.startsWith("@")) {
+      const scopeDir = path.join(nodeModulesDir, entry.name);
+      for (const scopedEntry of fs.readdirSync(scopeDir, { withFileTypes: true })) {
+        if (scopedEntry.isDirectory()) {
+          names.push(`${entry.name}/${scopedEntry.name}`);
+        }
+      }
+      continue;
+    }
+    names.push(entry.name);
+  }
+  return names;
+}
+
+function pruneStagedRuntimeDependencyCargo(nodeModulesDir, pruneConfig) {
+  for (const depName of listInstalledDependencyNames(nodeModulesDir)) {
+    pruneStagedInstalledDependencyCargo(nodeModulesDir, depName, pruneConfig);
+  }
 }
 
 function listBundledPluginRuntimeDirs(repoRoot) {
@@ -46,152 +246,116 @@ function sanitizeBundledManifestForRuntimeInstall(pluginDir) {
   const packageJson = readJson(manifestPath);
   let changed = false;
 
-  if (packageJson.peerDependencies?.openclaw) {
-    const nextPeerDependencies = { ...packageJson.peerDependencies };
-    delete nextPeerDependencies.openclaw;
-    if (Object.keys(nextPeerDependencies).length === 0) {
-      delete packageJson.peerDependencies;
-    } else {
-      packageJson.peerDependencies = nextPeerDependencies;
-    }
+  if (packageJson.peerDependencies) {
+    delete packageJson.peerDependencies;
     changed = true;
   }
 
-  if (packageJson.peerDependenciesMeta?.openclaw) {
-    const nextPeerDependenciesMeta = { ...packageJson.peerDependenciesMeta };
-    delete nextPeerDependenciesMeta.openclaw;
-    if (Object.keys(nextPeerDependenciesMeta).length === 0) {
-      delete packageJson.peerDependenciesMeta;
-    } else {
-      packageJson.peerDependenciesMeta = nextPeerDependenciesMeta;
-    }
+  if (packageJson.peerDependenciesMeta) {
+    delete packageJson.peerDependenciesMeta;
     changed = true;
   }
 
-  if (packageJson.devDependencies?.openclaw) {
-    const nextDevDependencies = { ...packageJson.devDependencies };
-    delete nextDevDependencies.openclaw;
-    if (Object.keys(nextDevDependencies).length === 0) {
-      delete packageJson.devDependencies;
-    } else {
-      packageJson.devDependencies = nextDevDependencies;
-    }
+  if (packageJson.devDependencies) {
+    delete packageJson.devDependencies;
     changed = true;
   }
 
   if (changed) {
     writeJson(manifestPath, packageJson);
   }
+
+  return packageJson;
 }
 
-export function resolveNpmRunner(params = {}) {
-  const execPath = params.execPath ?? process.execPath;
-  const npmArgs = params.npmArgs ?? [];
-  const existsSync = params.existsSync ?? fs.existsSync;
-  const env = params.env ?? process.env;
-  const platform = params.platform ?? process.platform;
-  const comSpec = params.comSpec ?? env.ComSpec ?? "cmd.exe";
-  const pathImpl = platform === "win32" ? path.win32 : path.posix;
-  const nodeDir = pathImpl.dirname(execPath);
-  const npmToolchain = resolveToolchainNpmRunner({
-    comSpec,
-    existsSync,
-    nodeDir,
-    npmArgs,
-    pathImpl,
-    platform,
-  });
-  if (npmToolchain) {
-    return npmToolchain;
-  }
-  if (platform === "win32") {
-    const expectedPaths = [
-      pathImpl.resolve(nodeDir, "../lib/node_modules/npm/bin/npm-cli.js"),
-      pathImpl.resolve(nodeDir, "node_modules/npm/bin/npm-cli.js"),
-      pathImpl.resolve(nodeDir, "npm.exe"),
-      pathImpl.resolve(nodeDir, "npm.cmd"),
-    ];
-    throw new Error(
-      `failed to resolve a toolchain-local npm next to ${execPath}. ` +
-        `Checked: ${expectedPaths.join(", ")}. ` +
-        "OpenClaw refuses to shell out to bare npm on Windows; install a Node.js toolchain that bundles npm or run with a matching Node installation.",
-    );
-  }
-  const pathKey = resolvePathEnvKey(env);
-  const currentPath = env[pathKey];
-  return {
-    command: "npm",
-    args: npmArgs,
-    shell: false,
-    env: {
-      ...env,
-      [pathKey]:
-        typeof currentPath === "string" && currentPath.length > 0
-          ? `${nodeDir}${path.delimiter}${currentPath}`
-          : nodeDir,
-    },
-  };
+function resolveRuntimeDepsStampPath(pluginDir) {
+  return path.join(pluginDir, ".openclaw-runtime-deps-stamp.json");
 }
 
-function resolveToolchainNpmRunner(params) {
-  const npmCliCandidates = [
-    params.pathImpl.resolve(params.nodeDir, "../lib/node_modules/npm/bin/npm-cli.js"),
-    params.pathImpl.resolve(params.nodeDir, "node_modules/npm/bin/npm-cli.js"),
-  ];
-  const npmCliPath = npmCliCandidates.find((candidate) => params.existsSync(candidate));
-  if (npmCliPath) {
-    return {
-      command:
-        params.platform === "win32"
-          ? params.pathImpl.join(params.nodeDir, "node.exe")
-          : params.pathImpl.join(params.nodeDir, "node"),
-      args: [npmCliPath, ...params.npmArgs],
-      shell: false,
-    };
-  }
-  if (params.platform !== "win32") {
+function createRuntimeDepsFingerprint(packageJson, pruneConfig) {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        globalPruneSuffixes: pruneConfig.globalPruneSuffixes,
+        packageJson,
+        pruneRules: [...pruneConfig.pruneRules.entries()],
+        version: runtimeDepsStagingVersion,
+      }),
+    )
+    .digest("hex");
+}
+
+function readRuntimeDepsStamp(stampPath) {
+  if (!fs.existsSync(stampPath)) {
     return null;
   }
-  const npmExePath = params.pathImpl.resolve(params.nodeDir, "npm.exe");
-  if (params.existsSync(npmExePath)) {
-    return {
-      command: npmExePath,
-      args: params.npmArgs,
-      shell: false,
-    };
+  try {
+    return readJson(stampPath);
+  } catch {
+    return null;
   }
-  const npmCmdPath = params.pathImpl.resolve(params.nodeDir, "npm.cmd");
-  if (params.existsSync(npmCmdPath)) {
-    return {
-      command: params.comSpec,
-      args: ["/d", "/s", "/c", buildCmdExeCommandLine(npmCmdPath, params.npmArgs)],
-      shell: false,
-      windowsVerbatimArguments: true,
-    };
-  }
-  return null;
 }
 
-function resolvePathEnvKey(env) {
-  return Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "PATH";
-}
-
-function escapeForCmdExe(arg) {
-  if (WINDOWS_UNSAFE_CMD_CHARS_RE.test(arg)) {
-    throw new Error(`unsafe Windows cmd.exe argument detected: ${JSON.stringify(arg)}`);
+function stageInstalledRootRuntimeDeps(params) {
+  const { fingerprint, packageJson, pluginDir, pruneConfig, repoRoot } = params;
+  const dependencySpecs = {
+    ...packageJson.dependencies,
+    ...packageJson.optionalDependencies,
+  };
+  const rootNodeModulesDir = path.join(repoRoot, "node_modules");
+  if (Object.keys(dependencySpecs).length === 0 || !fs.existsSync(rootNodeModulesDir)) {
+    return false;
   }
-  if (!arg.includes(" ") && !arg.includes('"')) {
-    return arg;
+
+  const dependencyNames = collectInstalledRuntimeClosure(rootNodeModulesDir, dependencySpecs);
+  if (dependencyNames === null) {
+    return false;
   }
-  return `"${arg.replace(/"/g, '""')}"`;
+
+  const nodeModulesDir = path.join(pluginDir, "node_modules");
+  const stampPath = resolveRuntimeDepsStampPath(pluginDir);
+  const stagedNodeModulesDir = path.join(
+    makeTempDir(
+      os.tmpdir(),
+      `openclaw-runtime-deps-${sanitizeTempPrefixSegment(path.basename(pluginDir))}-`,
+    ),
+    "node_modules",
+  );
+
+  try {
+    for (const depName of dependencyNames) {
+      const sourcePath = dependencyNodeModulesPath(rootNodeModulesDir, depName);
+      const targetPath = dependencyNodeModulesPath(stagedNodeModulesDir, depName);
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      fs.cpSync(sourcePath, targetPath, { recursive: true, force: true, dereference: true });
+    }
+    pruneStagedRuntimeDependencyCargo(stagedNodeModulesDir, pruneConfig);
+
+    replaceDir(nodeModulesDir, stagedNodeModulesDir);
+    writeJson(stampPath, {
+      fingerprint,
+      generatedAt: new Date().toISOString(),
+    });
+    return true;
+  } finally {
+    removePathIfExists(path.dirname(stagedNodeModulesDir));
+  }
 }
 
-function buildCmdExeCommandLine(command, args) {
-  return [escapeForCmdExe(command), ...args.map(escapeForCmdExe)].join(" ");
-}
-
-function installPluginRuntimeDeps(pluginDir, pluginId) {
-  sanitizeBundledManifestForRuntimeInstall(pluginDir);
+function installPluginRuntimeDeps(params) {
+  const { fingerprint, packageJson, pluginDir, pluginId, pruneConfig, repoRoot } = params;
+  if (
+    repoRoot &&
+    stageInstalledRootRuntimeDeps({ fingerprint, packageJson, pluginDir, pruneConfig, repoRoot })
+  ) {
+    return;
+  }
+  const nodeModulesDir = path.join(pluginDir, "node_modules");
+  const stampPath = resolveRuntimeDepsStampPath(pluginDir);
+  const tempInstallDir = makeTempDir(
+    os.tmpdir(),
+    `openclaw-runtime-deps-${sanitizeTempPrefixSegment(pluginId)}-`,
+  );
   const npmRunner = resolveNpmRunner({
     npmArgs: [
       "install",
@@ -202,34 +366,92 @@ function installPluginRuntimeDeps(pluginDir, pluginId) {
       "--package-lock=false",
     ],
   });
-  const result = spawnSync(npmRunner.command, npmRunner.args, {
-    cwd: pluginDir,
-    encoding: "utf8",
-    env: npmRunner.env,
-    stdio: "pipe",
-    shell: npmRunner.shell,
-    windowsVerbatimArguments: npmRunner.windowsVerbatimArguments,
-  });
-  if (result.status === 0) {
-    return;
+  try {
+    writeJson(path.join(tempInstallDir, "package.json"), packageJson);
+    const result = spawnSync(npmRunner.command, npmRunner.args, {
+      cwd: tempInstallDir,
+      encoding: "utf8",
+      env: npmRunner.env,
+      stdio: "pipe",
+      shell: npmRunner.shell,
+      windowsVerbatimArguments: npmRunner.windowsVerbatimArguments,
+    });
+    if (result.status !== 0) {
+      const output = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+      throw new Error(
+        `failed to stage bundled runtime deps for ${pluginId}: ${output || "npm install failed"}`,
+      );
+    }
+
+    const stagedNodeModulesDir = path.join(tempInstallDir, "node_modules");
+    if (!fs.existsSync(stagedNodeModulesDir)) {
+      throw new Error(
+        `failed to stage bundled runtime deps for ${pluginId}: npm install produced no node_modules directory`,
+      );
+    }
+
+    pruneStagedRuntimeDependencyCargo(stagedNodeModulesDir, pruneConfig);
+
+    replaceDir(nodeModulesDir, stagedNodeModulesDir);
+    writeJson(stampPath, {
+      fingerprint,
+      generatedAt: new Date().toISOString(),
+    });
+  } finally {
+    removePathIfExists(tempInstallDir);
   }
-  const output = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
-  throw new Error(
-    `failed to stage bundled runtime deps for ${pluginId}: ${output || "npm install failed"}`,
-  );
+}
+
+function installPluginRuntimeDepsWithRetries(params) {
+  const { attempts = 3 } = params;
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      params.install({ ...params.installParams, attempt });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts) {
+        break;
+      }
+    }
+  }
+  throw lastError;
 }
 
 export function stageBundledPluginRuntimeDeps(params = {}) {
   const repoRoot = params.cwd ?? params.repoRoot ?? process.cwd();
+  const installPluginRuntimeDepsImpl =
+    params.installPluginRuntimeDepsImpl ?? installPluginRuntimeDeps;
+  const installAttempts = params.installAttempts ?? 3;
+  const pruneConfig = resolveRuntimeDepPruneConfig(params);
   for (const pluginDir of listBundledPluginRuntimeDirs(repoRoot)) {
     const pluginId = path.basename(pluginDir);
-    const packageJson = readJson(path.join(pluginDir, "package.json"));
+    const packageJson = sanitizeBundledManifestForRuntimeInstall(pluginDir);
     const nodeModulesDir = path.join(pluginDir, "node_modules");
-    removePathIfExists(nodeModulesDir);
+    const stampPath = resolveRuntimeDepsStampPath(pluginDir);
     if (!hasRuntimeDeps(packageJson) || !shouldStageRuntimeDeps(packageJson)) {
+      removePathIfExists(nodeModulesDir);
+      removePathIfExists(stampPath);
       continue;
     }
-    installPluginRuntimeDeps(pluginDir, pluginId);
+    const fingerprint = createRuntimeDepsFingerprint(packageJson, pruneConfig);
+    const stamp = readRuntimeDepsStamp(stampPath);
+    if (fs.existsSync(nodeModulesDir) && stamp?.fingerprint === fingerprint) {
+      continue;
+    }
+    installPluginRuntimeDepsWithRetries({
+      attempts: installAttempts,
+      install: installPluginRuntimeDepsImpl,
+      installParams: {
+        fingerprint,
+        packageJson,
+        pluginDir,
+        pluginId,
+        pruneConfig,
+        repoRoot,
+      },
+    });
   }
 }
 
