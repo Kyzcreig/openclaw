@@ -42,7 +42,11 @@ async function getSessionsHandlers() {
 }
 
 const sessionCleanupMocks = vi.hoisted(() => ({
-  clearSessionQueues: vi.fn(() => ({ followupCleared: 0, laneCleared: 0, keys: [] })),
+  clearSessionQueues: vi.fn(() => ({
+    followupCleared: 0,
+    laneCleared: 0,
+    keys: [],
+  })),
   stopSubagentsForRequester: vi.fn(() => ({ stopped: 0 })),
 }));
 
@@ -283,7 +287,9 @@ async function createCheckpointFixture(dir: string) {
   );
   fsSync.copyFileSync(sessionFile, preCompactionSessionFile);
   const preCompactionSession = SessionManager.open(preCompactionSessionFile, dir);
-  session.appendCompaction("checkpoint summary", preCompactionLeafId, 123, { ok: true });
+  session.appendCompaction("checkpoint summary", preCompactionLeafId, 123, {
+    ok: true,
+  });
   const postCompactionLeafId = session.getLeafId();
   if (!postCompactionLeafId) {
     throw new Error("expected post-compaction leaf");
@@ -361,6 +367,8 @@ function isInternalHookEvent(value: unknown): value is InternalHookEvent {
 describe("gateway server sessions", () => {
   beforeEach(async () => {
     const { clearConfigCache, clearRuntimeConfigSnapshot } = await getGatewayConfigModule();
+    const { clearAgentHarnesses } = await import("../agents/harness/registry.js");
+    clearAgentHarnesses();
     clearRuntimeConfigSnapshot();
     clearConfigCache();
     sessionCleanupMocks.clearSessionQueues.mockClear();
@@ -1369,7 +1377,11 @@ describe("gateway server sessions", () => {
     const listedCheckpoints = await rpcReq<{
       ok: true;
       key: string;
-      checkpoints: Array<{ checkpointId: string; summary?: string; tokensBefore?: number }>;
+      checkpoints: Array<{
+        checkpointId: string;
+        summary?: string;
+        tokensBefore?: number;
+      }>;
     }>(ws, "sessions.compaction.list", { key: "main" });
     expect(listedCheckpoints.ok).toBe(true);
     expect(listedCheckpoints.payload?.key).toBe("agent:main:main");
@@ -1383,7 +1395,10 @@ describe("gateway server sessions", () => {
     const checkpoint = await rpcReq<{
       ok: true;
       key: string;
-      checkpoint: { checkpointId: string; preCompaction: { sessionFile: string } };
+      checkpoint: {
+        checkpointId: string;
+        preCompaction: { sessionFile: string };
+      };
     }>(ws, "sessions.compaction.get", {
       key: "main",
       checkpointId: "checkpoint-1",
@@ -1398,7 +1413,11 @@ describe("gateway server sessions", () => {
       ok: true;
       sourceKey: string;
       key: string;
-      entry: { sessionId: string; sessionFile?: string; parentSessionKey?: string };
+      entry: {
+        sessionId: string;
+        sessionFile?: string;
+        parentSessionKey?: string;
+      };
     }>(ws, "sessions.compaction.branch", {
       key: "main",
       checkpointId: "checkpoint-1",
@@ -1429,7 +1448,11 @@ describe("gateway server sessions", () => {
       ok: true;
       key: string;
       sessionId: string;
-      entry: { sessionId: string; sessionFile?: string; compactionCheckpoints?: unknown[] };
+      entry: {
+        sessionId: string;
+        sessionFile?: string;
+        compactionCheckpoints?: unknown[];
+      };
     }>(ws, "sessions.compaction.restore", {
       key: "main",
       checkpointId: "checkpoint-1",
@@ -1503,7 +1526,11 @@ describe("gateway server sessions", () => {
 
     const store = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
       string,
-      { compactionCount?: number; totalTokens?: number; totalTokensFresh?: boolean }
+      {
+        compactionCount?: number;
+        totalTokens?: number;
+        totalTokensFresh?: boolean;
+      }
     >;
     expect(store["agent:main:main"]?.compactionCount).toBe(1);
     expect(store["agent:main:main"]?.totalTokens).toBe(80);
@@ -1548,7 +1575,11 @@ describe("gateway server sessions", () => {
         try {
           piSdkMock.enabled = true;
           piSdkMock.models = [
-            { id: "moonshotai/kimi-k2.5", name: "Kimi K2.5 (NVIDIA)", provider: "nvidia" },
+            {
+              id: "moonshotai/kimi-k2.5",
+              name: "Kimi K2.5 (NVIDIA)",
+              provider: "nvidia",
+            },
           ];
 
           const patched = await rpcReq<{
@@ -1573,7 +1604,11 @@ describe("gateway server sessions", () => {
           expect(patched.payload?.resolved?.model).toBe("moonshotai/kimi-k2.5");
 
           const listed = await rpcReq<{
-            sessions: Array<{ key: string; modelProvider?: string; model?: string }>;
+            sessions: Array<{
+              key: string;
+              modelProvider?: string;
+              model?: string;
+            }>;
           }>(ws, "sessions.list", {});
           expect(listed.ok).toBe(true);
           const mainSession = listed.payload?.sessions.find(
@@ -2132,7 +2167,9 @@ describe("gateway server sessions", () => {
     const transcriptPath = path.join(dir, `${sessionId}.jsonl`);
     const lines = [
       JSON.stringify({ type: "session", version: 1, id: sessionId }),
-      JSON.stringify({ message: { role: "assistant", content: "Legacy alias transcript" } }),
+      JSON.stringify({
+        message: { role: "assistant", content: "Legacy alias transcript" },
+      }),
     ];
     await fs.writeFile(transcriptPath, lines.join("\n"), "utf-8");
     await fs.writeFile(
@@ -2168,7 +2205,9 @@ describe("gateway server sessions", () => {
       staleTranscriptPath,
       [
         JSON.stringify({ type: "session", version: 1, id: "sess-stale-main" }),
-        JSON.stringify({ message: { role: "assistant", content: "stale preview" } }),
+        JSON.stringify({
+          message: { role: "assistant", content: "stale preview" },
+        }),
       ].join("\n"),
       "utf-8",
     );
@@ -2176,7 +2215,9 @@ describe("gateway server sessions", () => {
       freshTranscriptPath,
       [
         JSON.stringify({ type: "session", version: 1, id: "sess-fresh-main" }),
-        JSON.stringify({ message: { role: "assistant", content: "fresh preview" } }),
+        JSON.stringify({
+          message: { role: "assistant", content: "fresh preview" },
+        }),
       ].join("\n"),
       "utf-8",
     );
@@ -2551,7 +2592,12 @@ describe("gateway server sessions", () => {
     const event = (
       subagentLifecycleHookMocks.runSubagentEnded.mock.calls as unknown[][]
     )[0]?.[0] as
-      | { targetKind?: string; targetSessionKey?: string; reason?: string; outcome?: string }
+      | {
+          targetKind?: string;
+          targetSessionKey?: string;
+          reason?: string;
+          outcome?: string;
+        }
       | undefined;
     expect(event).toMatchObject({
       targetSessionKey: "agent:main:subagent:worker",
@@ -2637,13 +2683,13 @@ describe("gateway server sessions", () => {
 
     const { ws } = await openClient();
 
-    const reset = await rpcReq<{ ok: true; key: string; entry: { sessionId: string } }>(
-      ws,
-      "sessions.reset",
-      {
-        key: "main",
-      },
-    );
+    const reset = await rpcReq<{
+      ok: true;
+      key: string;
+      entry: { sessionId: string };
+    }>(ws, "sessions.reset", {
+      key: "main",
+    });
     expect(reset.ok).toBe(true);
     expect(reset.payload?.key).toBe("agent:main:main");
     expect(reset.payload?.entry.sessionId).not.toBe("sess-main");
@@ -2827,13 +2873,13 @@ describe("gateway server sessions", () => {
     });
 
     const { ws } = await openClient();
-    const reset = await rpcReq<{ ok: true; key: string; entry: { sessionId: string } }>(
-      ws,
-      "sessions.reset",
-      {
-        key: "agent:main:subagent:missing",
-      },
-    );
+    const reset = await rpcReq<{
+      ok: true;
+      key: string;
+      entry: { sessionId: string };
+    }>(ws, "sessions.reset", {
+      key: "agent:main:subagent:missing",
+    });
 
     expect(reset.ok).toBe(true);
     expect(subagentLifecycleHookMocks.runSubagentEnded).not.toHaveBeenCalled();
@@ -2855,13 +2901,13 @@ describe("gateway server sessions", () => {
     });
 
     const { ws } = await openClient();
-    const reset = await rpcReq<{ ok: true; key: string; entry: { sessionId: string } }>(
-      ws,
-      "sessions.reset",
-      {
-        key: "agent:main:subagent:worker",
-      },
-    );
+    const reset = await rpcReq<{
+      ok: true;
+      key: string;
+      entry: { sessionId: string };
+    }>(ws, "sessions.reset", {
+      key: "agent:main:subagent:worker",
+    });
     expect(reset.ok).toBe(true);
     expect(reset.payload?.key).toBe("agent:main:subagent:worker");
     expect(reset.payload?.entry.sessionId).not.toBe("sess-subagent");
@@ -2869,7 +2915,12 @@ describe("gateway server sessions", () => {
     const event = (
       subagentLifecycleHookMocks.runSubagentEnded.mock.calls as unknown[][]
     )[0]?.[0] as
-      | { targetKind?: string; targetSessionKey?: string; reason?: string; outcome?: string }
+      | {
+          targetKind?: string;
+          targetSessionKey?: string;
+          reason?: string;
+          outcome?: string;
+        }
       | undefined;
     expect(event).toMatchObject({
       targetSessionKey: "agent:main:subagent:worker",
@@ -2914,6 +2965,55 @@ describe("gateway server sessions", () => {
     ws.close();
   });
 
+  test("sessions.reset dispatches registered agent harness reset hooks", async () => {
+    const { dir } = await createSessionStoreDir();
+    const transcriptPath = path.join(dir, "sess-main.jsonl");
+    await fs.writeFile(
+      transcriptPath,
+      `${JSON.stringify({
+        type: "message",
+        id: "m1",
+        message: { role: "user", content: "hello" },
+      })}\n`,
+      "utf-8",
+    );
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-main",
+          sessionFile: transcriptPath,
+          updatedAt: Date.now(),
+        },
+      },
+    });
+
+    const resetHook = vi.fn(async () => {});
+    const { registerAgentHarness } = await import("../agents/harness/registry.js");
+    registerAgentHarness({
+      id: "test-harness",
+      label: "Test harness",
+      supports: () => ({ supported: true }),
+      async runAttempt() {
+        throw new Error("not used");
+      },
+      reset: resetHook,
+    });
+
+    const { ws } = await openClient();
+    const reset = await rpcReq<{ ok: true; key: string }>(ws, "sessions.reset", {
+      key: "main",
+    });
+
+    expect(reset.ok).toBe(true);
+    expect(resetHook).toHaveBeenCalledWith({
+      sessionId: "sess-main",
+      sessionKey: "agent:main:main",
+      sessionFile: transcriptPath,
+      reason: "reset",
+    });
+    ws.close();
+  });
+
   test("sessions.reset emits internal command hook with reason", async () => {
     const { dir } = await createSessionStoreDir();
     await writeSingleLineSession(dir, "sess-main", "hello");
@@ -2945,7 +3045,9 @@ describe("gateway server sessions", () => {
         commandSource: "gateway:sessions.reset",
       },
     });
-    expect(event.context?.previousSessionEntry).toMatchObject({ sessionId: "sess-main" });
+    expect(event.context?.previousSessionEntry).toMatchObject({
+      sessionId: "sess-main",
+    });
     ws.close();
   });
 

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodexAppServerClient } from "./client.js";
 import { maybeCompactCodexAppServerSession, __testing } from "./compact.js";
 import type { CodexServerNotification } from "./protocol.js";
-import { writeCodexAppServerBinding } from "./session-binding.js";
+import { readCodexAppServerBinding, writeCodexAppServerBinding } from "./session-binding.js";
 
 let tempDir: string;
 
@@ -36,7 +36,9 @@ describe("maybeCompactCodexAppServerSession", () => {
       currentTokenCount: 123,
     });
     await vi.waitFor(() => {
-      expect(fake.request).toHaveBeenCalledWith("thread/compact/start", { threadId: "thread-1" });
+      expect(fake.request).toHaveBeenCalledWith("thread/compact/start", {
+        threadId: "thread-1",
+      });
     });
 
     let settled = false;
@@ -83,7 +85,9 @@ describe("maybeCompactCodexAppServerSession", () => {
       workspaceDir: tempDir,
     });
     await vi.waitFor(() => {
-      expect(fake.request).toHaveBeenCalledWith("thread/compact/start", { threadId: "thread-1" });
+      expect(fake.request).toHaveBeenCalledWith("thread/compact/start", {
+        threadId: "thread-1",
+      });
     });
     fake.emit({
       method: "item/completed",
@@ -104,6 +108,32 @@ describe("maybeCompactCodexAppServerSession", () => {
         },
       },
     });
+  });
+
+  it("clears stale bindings when native compaction reports a missing thread", async () => {
+    const fake = createFakeCodexClient();
+    fake.request.mockRejectedValueOnce(new Error("thread not found: thread-1"));
+    __testing.setCodexAppServerClientFactoryForTests(async () => fake.client);
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    await writeCodexAppServerBinding(sessionFile, {
+      threadId: "thread-1",
+      cwd: tempDir,
+    });
+
+    await expect(
+      maybeCompactCodexAppServerSession({
+        sessionId: "session-1",
+        sessionKey: "agent:main:session-1",
+        sessionFile,
+        workspaceDir: tempDir,
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      compacted: false,
+      reason: "stale codex app-server thread binding cleared",
+    });
+
+    await expect(readCodexAppServerBinding(sessionFile)).resolves.toBeUndefined();
   });
 });
 

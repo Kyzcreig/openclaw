@@ -6,7 +6,7 @@ import {
 import type { CodexAppServerClient, CodexServerNotificationHandler } from "./client.js";
 import { resolveCodexAppServerRuntimeOptions, type CodexAppServerStartOptions } from "./config.js";
 import { isJsonObject, type CodexServerNotification, type JsonObject } from "./protocol.js";
-import { readCodexAppServerBinding } from "./session-binding.js";
+import { clearCodexAppServerBinding, readCodexAppServerBinding } from "./session-binding.js";
 import { getSharedCodexAppServerClient } from "./shared-client.js";
 
 type CodexAppServerClientFactory = (
@@ -32,10 +32,16 @@ export async function maybeCompactCodexAppServerSession(
   params: CompactEmbeddedPiSessionParams,
   options: { pluginConfig?: unknown } = {},
 ): Promise<EmbeddedPiCompactResult | undefined> {
-  const appServer = resolveCodexAppServerRuntimeOptions({ pluginConfig: options.pluginConfig });
+  const appServer = resolveCodexAppServerRuntimeOptions({
+    pluginConfig: options.pluginConfig,
+  });
   const binding = await readCodexAppServerBinding(params.sessionFile);
   if (!binding?.threadId) {
-    return { ok: false, compacted: false, reason: "no codex app-server thread binding" };
+    return {
+      ok: false,
+      compacted: false,
+      reason: "no codex app-server thread binding",
+    };
   }
 
   const client = await clientFactory(appServer.start);
@@ -53,10 +59,26 @@ export async function maybeCompactCodexAppServerSession(
     completion = await waiter.promise;
   } catch (error) {
     waiter.cancel();
+    const reason = formatCompactionError(error);
+    if (isMissingThreadError(reason)) {
+      await clearCodexAppServerBinding(params.sessionFile);
+      embeddedAgentLog.warn(
+        "cleared stale codex app-server binding after missing compaction thread",
+        {
+          sessionId: params.sessionId,
+          threadId: binding.threadId,
+        },
+      );
+      return {
+        ok: true,
+        compacted: false,
+        reason: "stale codex app-server thread binding cleared",
+      };
+    }
     return {
       ok: false,
       compacted: false,
-      reason: formatCompactionError(error),
+      reason,
     };
   }
   embeddedAgentLog.info("completed codex app-server compaction", {
@@ -205,6 +227,10 @@ function formatCompactionError(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+function isMissingThreadError(message: string): boolean {
+  return /\bthread not found:/iu.test(message);
 }
 
 export const __testing = {

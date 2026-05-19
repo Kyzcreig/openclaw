@@ -7,6 +7,7 @@ import { getAcpRuntimeBackend } from "../acp/runtime/registry.js";
 import { readAcpSessionEntry, upsertAcpSessionMeta } from "../acp/runtime/session-meta.js";
 import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { clearBootstrapSnapshot } from "../agents/bootstrap-cache.js";
+import { resetRegisteredAgentHarnessSessions } from "../agents/harness/registry.js";
 import { abortEmbeddedPiRun, waitForEmbeddedPiRunEnd } from "../agents/pi-embedded.js";
 import { stopSubagentsForRequester } from "../auto-reply/reply/abort.js";
 import { clearSessionQueues } from "../auto-reply/reply/queue.js";
@@ -256,7 +257,10 @@ async function ensureSessionRuntimeCleanup(params: {
     queueKeys.add(params.sessionId);
   }
   clearSessionQueues([...queueKeys]);
-  stopSubagentsForRequester({ cfg: params.cfg, requesterSessionKey: params.target.canonicalKey });
+  stopSubagentsForRequester({
+    cfg: params.cfg,
+    requesterSessionKey: params.target.canonicalKey,
+  });
   if (!params.sessionId) {
     clearBootstrapSnapshot(params.target.canonicalKey);
     await closeTrackedBrowserTabs();
@@ -443,6 +447,12 @@ export async function cleanupSessionBeforeMutation(params: {
   if (cleanupError) {
     return cleanupError;
   }
+  await resetRegisteredAgentHarnessSessions({
+    sessionId: params.entry?.sessionId,
+    sessionKey: params.legacyKey ?? params.canonicalKey ?? params.target.canonicalKey ?? params.key,
+    sessionFile: params.entry?.sessionFile,
+    reason: params.reason === "session-delete" ? "deleted" : "reset",
+  });
   return await closeAcpRuntimeForSession({
     cfg: params.cfg,
     sessionKey: params.legacyKey ?? params.canonicalKey ?? params.target.canonicalKey ?? params.key,
