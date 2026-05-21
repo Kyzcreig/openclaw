@@ -31,6 +31,7 @@ export type TelegramDraftStream = {
   visibleSinceMs?: () => number | undefined;
   previewRevision?: () => number;
   lastDeliveredText?: () => string;
+  lastAttemptedText?: () => string;
   clear: () => Promise<void>;
   stop: () => Promise<void>;
   /** Stop without a final flush or delete. */
@@ -125,6 +126,7 @@ export function createTelegramDraftStream(params: {
   let streamMessageId: number | undefined;
   let streamVisibleSinceMs: number | undefined;
   let lastSentText = "";
+  let lastAttemptedText = "";
   let lastDeliveredText = "";
   let lastSentParseMode: "HTML" | undefined;
   let previewRevision = 0;
@@ -288,6 +290,7 @@ export function createTelegramDraftStream(params: {
     }
 
     lastSentText = renderedText;
+    lastAttemptedText = currentText;
     lastSentParseMode = renderedParseMode;
     try {
       const sent = await sendMessageTransportPreview({
@@ -321,6 +324,7 @@ export function createTelegramDraftStream(params: {
     streamMessageId = undefined;
     streamVisibleSinceMs = undefined;
     lastSentText = "";
+    lastAttemptedText = "";
     lastSentParseMode = undefined;
     if (options?.resetOffset !== false) {
       deliveredTextOffset = 0;
@@ -372,6 +376,7 @@ export function createTelegramDraftStream(params: {
     visibleSinceMs: () => streamVisibleSinceMs,
     previewRevision: () => previewRevision,
     lastDeliveredText: () => lastDeliveredText,
+    lastAttemptedText: () => lastAttemptedText,
     clear,
     stop,
     discard,

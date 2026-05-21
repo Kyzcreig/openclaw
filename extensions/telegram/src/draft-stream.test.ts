@@ -349,6 +349,18 @@ describe("createTelegramDraftStream", () => {
     expect(stream.sendMayHaveLanded?.()).toBe(true);
   });
 
+  it("exposes the last attempted preview text after an ambiguous send failure", async () => {
+    const api = createMockDraftApi();
+    api.sendMessage.mockRejectedValueOnce(new Error("timeout after Telegram accepted send"));
+    const stream = createDraftStream(api);
+
+    stream.update("Hello partial");
+    await stream.flush();
+
+    expect(stream.lastAttemptedText?.()).toBe("Hello partial");
+    expect(stream.lastDeliveredText?.()).toBe("");
+  });
+
   async function expectSendMayHaveLandedStateAfterFirstFailure(error: Error, expected: boolean) {
     const api = createMockDraftApi();
     api.sendMessage.mockRejectedValueOnce(error);

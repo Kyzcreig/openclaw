@@ -216,6 +216,24 @@ describe("createLaneTextDeliverer", () => {
     expect(harness.lanes.answer.finalized).toBe(true);
   });
 
+  it("uses normal final delivery when a maybe-landed stream preview is stale", async () => {
+    const answer = createTestDraftStream();
+    answer.sendMayHaveLanded.mockReturnValue(true);
+    answer.lastAttemptedText.mockReturnValue("working partial");
+    const harness = createHarness({ answerStream: answer });
+
+    const result = await deliverFinalAnswer(harness, HELLO_FINAL);
+
+    expect(result.kind).toBe("sent");
+    expect(answer.update).toHaveBeenCalledWith(HELLO_FINAL);
+    expect(harness.sendPayload).toHaveBeenCalledWith({ text: HELLO_FINAL }, { durable: true });
+    expect(harness.markDelivered).not.toHaveBeenCalled();
+    expect(harness.log).toHaveBeenCalledWith(
+      "telegram: answer stream preview may have landed without id; sending final normally because final text changed",
+    );
+    expect(harness.lanes.answer.finalized).toBe(true);
+  });
+
   it("attaches buttons to the stream message without sending a second reply", async () => {
     const harness = createHarness({ answerMessageId: 999 });
     const buttons = [[{ text: "OK", callback_data: "ok" }]];

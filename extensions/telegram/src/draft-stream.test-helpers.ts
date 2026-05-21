@@ -7,6 +7,7 @@ type TestDraftStream = {
   visibleSinceMs: ReturnType<typeof vi.fn<() => number | undefined>>;
   previewRevision: ReturnType<typeof vi.fn<() => number>>;
   lastDeliveredText: ReturnType<typeof vi.fn<() => string>>;
+  lastAttemptedText: ReturnType<typeof vi.fn<() => string>>;
   clear: ReturnType<typeof vi.fn<() => Promise<void>>>;
   stop: ReturnType<typeof vi.fn<() => Promise<void>>>;
   discard: ReturnType<typeof vi.fn<() => Promise<void>>>;
@@ -28,10 +29,12 @@ export function createTestDraftStream(params?: {
   let visibleSinceMs = params?.visibleSinceMs;
   let previewRevision = 0;
   let lastDeliveredText = "";
+  let lastAttemptedText = "";
   return {
     update: vi.fn().mockImplementation((text: string) => {
       previewRevision += 1;
       lastDeliveredText = text.trimEnd();
+      lastAttemptedText = text.trimEnd();
       params?.onUpdate?.(text);
     }),
     flush: vi.fn().mockResolvedValue(undefined),
@@ -39,6 +42,7 @@ export function createTestDraftStream(params?: {
     visibleSinceMs: vi.fn().mockImplementation(() => visibleSinceMs),
     previewRevision: vi.fn().mockImplementation(() => previewRevision),
     lastDeliveredText: vi.fn().mockImplementation(() => lastDeliveredText),
+    lastAttemptedText: vi.fn().mockImplementation(() => lastAttemptedText),
     clear: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockImplementation(async () => {
       await params?.onStop?.();
@@ -67,6 +71,7 @@ export function createSequencedTestDraftStream(startMessageId = 1001): TestDraft
   let nextMessageId = startMessageId;
   let previewRevision = 0;
   let lastDeliveredText = "";
+  let lastAttemptedText = "";
   return {
     update: vi.fn().mockImplementation((text: string) => {
       if (activeMessageId == null) {
@@ -75,12 +80,14 @@ export function createSequencedTestDraftStream(startMessageId = 1001): TestDraft
       }
       previewRevision += 1;
       lastDeliveredText = text.trimEnd();
+      lastAttemptedText = text.trimEnd();
     }),
     flush: vi.fn().mockResolvedValue(undefined),
     messageId: vi.fn().mockImplementation(() => activeMessageId),
     visibleSinceMs: vi.fn().mockImplementation(() => visibleSinceMs),
     previewRevision: vi.fn().mockImplementation(() => previewRevision),
     lastDeliveredText: vi.fn().mockImplementation(() => lastDeliveredText),
+    lastAttemptedText: vi.fn().mockImplementation(() => lastAttemptedText),
     clear: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
     discard: vi.fn().mockResolvedValue(undefined),

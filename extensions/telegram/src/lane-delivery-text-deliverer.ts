@@ -151,9 +151,16 @@ export function createLaneTextDeliverer(params: CreateLaneTextDelivererParams) {
     const messageId = stream.messageId();
     if (typeof messageId !== "number") {
       if (isFinal && stream.sendMayHaveLanded?.()) {
-        lane.finalized = true;
-        params.markDelivered();
-        return result("preview-retained");
+        const attemptedStreamText = stream.lastAttemptedText?.();
+        const finalStreamText = firstChunk.trimEnd();
+        if (attemptedStreamText === finalStreamText) {
+          lane.finalized = true;
+          params.markDelivered();
+          return result("preview-retained");
+        }
+        params.log(
+          `telegram: ${laneName} stream preview may have landed without id; sending final normally because final text changed`,
+        );
       }
       return undefined;
     }
