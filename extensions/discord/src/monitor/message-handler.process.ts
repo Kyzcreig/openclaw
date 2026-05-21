@@ -468,7 +468,8 @@ export async function processDiscordMessage(
               draft: {
                 flush: () => draftPreview.flush(),
                 clear: () => draftStream.clear(),
-                discardPending: () => draftStream.discardPending(),
+                // Discord fallback finals should remove the visible draft first; otherwise a
+                // failed final edit leaves the preview next to the normal final send.
                 seal: () => draftStream.seal(),
                 id: draftStream.messageId,
               },

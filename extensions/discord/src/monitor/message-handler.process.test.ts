@@ -1414,6 +1414,18 @@ describe("processDiscordMessage draft streaming", () => {
     expect(deliverDiscordReply).toHaveBeenCalledTimes(1);
   });
 
+  it("clears the visible preview before standard send fallback after final edit failure", async () => {
+    const draftStream = createMockDraftStreamForTest();
+    editMessageDiscord.mockRejectedValueOnce(new Error("discord edit timeout"));
+
+    await runSingleChunkFinalScenario({ streamMode: "partial", maxLinesPerMessage: 5 });
+
+    expect(editMessageDiscord).toHaveBeenCalledTimes(1);
+    expect(draftStream.clear).toHaveBeenCalledTimes(2);
+    expect(draftStream.discardPending).not.toHaveBeenCalled();
+    expect(deliverDiscordReply).toHaveBeenCalledTimes(1);
+  });
+
   it("uses root discord maxLinesPerMessage for preview finalization when runtime config omits it", async () => {
     const longReply = Array.from({ length: 20 }, (_value, index) => `Line ${index + 1}`).join("\n");
     dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
@@ -1478,8 +1490,8 @@ describe("processDiscordMessage draft streaming", () => {
     await runProcessDiscordMessage(ctx);
 
     expect(draftStream.flush).not.toHaveBeenCalled();
-    expect(draftStream.discardPending).toHaveBeenCalledTimes(1);
-    expect(draftStream.clear).toHaveBeenCalledTimes(1);
+    expect(draftStream.discardPending).not.toHaveBeenCalled();
+    expect(draftStream.clear).toHaveBeenCalledTimes(2);
     expect(editMessageDiscord).not.toHaveBeenCalled();
     expect(deliverDiscordReply).toHaveBeenCalledTimes(1);
   });
@@ -1501,8 +1513,8 @@ describe("processDiscordMessage draft streaming", () => {
     await runProcessDiscordMessage(ctx);
 
     expect(draftStream.flush).not.toHaveBeenCalled();
-    expect(draftStream.discardPending).toHaveBeenCalledTimes(1);
-    expect(draftStream.clear).toHaveBeenCalledTimes(1);
+    expect(draftStream.discardPending).not.toHaveBeenCalled();
+    expect(draftStream.clear).toHaveBeenCalledTimes(2);
     expect(editMessageDiscord).not.toHaveBeenCalled();
     expect(deliverDiscordReply).toHaveBeenCalledTimes(1);
   });
