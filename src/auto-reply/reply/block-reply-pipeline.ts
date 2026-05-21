@@ -13,6 +13,7 @@ export type BlockReplyPipeline = {
   didStream: () => boolean;
   isAborted: () => boolean;
   hasSentPayload: (payload: ReplyPayload) => boolean;
+  getStreamedText?: () => string;
   getSentMediaUrls: () => readonly string[];
 };
 
@@ -289,6 +290,7 @@ export function createBlockReplyPipeline(params: {
       const normalize = (text: string) => text.replace(/\s+/g, "");
       return normalize(streamedTextFragments.join("")) === normalize(reply.trimmedText);
     },
+    getStreamedText: () => streamedTextFragments.join(""),
     getSentMediaUrls: () => Array.from(sentMediaUrls),
   };
 }

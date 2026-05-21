@@ -462,7 +462,7 @@ describe("buildReplyPayloads media filter integration", () => {
     const pipeline: Parameters<typeof buildReplyPayloads>[0]["blockReplyPipeline"] = {
       didStream: () => true,
       isAborted: () => false,
-      hasSentPayload: () => false,
+      hasSentPayload: (payload) => payload.text === "response",
       enqueue: () => {},
       flush: async () => {},
       stop: () => {},
@@ -482,13 +482,61 @@ describe("buildReplyPayloads media filter integration", () => {
     expect(replyPayloads).toHaveLength(0);
   });
 
+  it("keeps final payloads when earlier streamed text does not match the final reply", async () => {
+    const pipeline: Parameters<typeof buildReplyPayloads>[0]["blockReplyPipeline"] = {
+      didStream: () => true,
+      isAborted: () => false,
+      hasSentPayload: () => false,
+      enqueue: () => {},
+      flush: async () => {},
+      stop: () => {},
+      hasBuffered: () => false,
+      getStreamedText: () => "earlier tool progress that should not replace the final",
+      getSentMediaUrls: () => [],
+    };
+
+    const { replyPayloads } = await buildReplyPayloads({
+      ...baseParams,
+      blockStreamingEnabled: true,
+      blockReplyPipeline: pipeline,
+      payloads: [{ text: "final answer with new information" }],
+    });
+
+    expect(replyPayloads).toHaveLength(1);
+    expect(replyPayloads[0]?.text).toBe("final answer with new information");
+  });
+
+  it("keeps only the unsent final suffix when streamed text is a final prefix", async () => {
+    const pipeline: Parameters<typeof buildReplyPayloads>[0]["blockReplyPipeline"] = {
+      didStream: () => true,
+      isAborted: () => false,
+      hasSentPayload: () => false,
+      enqueue: () => {},
+      flush: async () => {},
+      stop: () => {},
+      hasBuffered: () => false,
+      getStreamedText: () => "final answer",
+      getSentMediaUrls: () => [],
+    };
+
+    const { replyPayloads } = await buildReplyPayloads({
+      ...baseParams,
+      blockStreamingEnabled: true,
+      blockReplyPipeline: pipeline,
+      payloads: [{ text: "final answer with new information" }],
+    });
+
+    expect(replyPayloads).toHaveLength(1);
+    expect(replyPayloads[0]?.text).toBe("with new information");
+  });
+
   it("flushes a pending block pipeline before suppressing final payloads", async () => {
     let didStream = false;
     let flushCalls = 0;
     const pipeline: Parameters<typeof buildReplyPayloads>[0]["blockReplyPipeline"] = {
       didStream: () => didStream,
       isAborted: () => false,
-      hasSentPayload: () => false,
+      hasSentPayload: (payload) => payload.text === "response",
       enqueue: () => {},
       flush: async (options) => {
         flushCalls += 1;
