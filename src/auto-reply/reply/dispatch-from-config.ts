@@ -223,6 +223,37 @@ function checkRecentFinalDeliveryDedupe(params: {
   };
 }
 
+function runFinalDeliveryDedupeSelfTest(): void {
+  const first = checkRecentFinalDeliveryDedupe({
+    accountId: "self-test",
+    channel: "self-test",
+    now: 1,
+    payload: { text: "openclaw final delivery dedupe self-test" },
+    sessionKey: "self-test",
+    to: "self-test",
+  });
+  if (first.shouldSuppress) {
+    logWarn("delivery: final dedupe self-test failed before initial remember");
+    recentFinalDeliveryDedupe.clear();
+    return;
+  }
+  first.remember();
+  const second = checkRecentFinalDeliveryDedupe({
+    accountId: "self-test",
+    channel: "self-test",
+    now: 2,
+    payload: { text: "openclaw final delivery dedupe self-test" },
+    sessionKey: "self-test",
+    to: "self-test",
+  });
+  if (!second.shouldSuppress) {
+    logWarn("delivery: final dedupe self-test failed to suppress duplicate");
+  }
+  recentFinalDeliveryDedupe.clear();
+}
+
+runFinalDeliveryDedupeSelfTest();
+
 export const dispatchFromConfigTesting = {
   resetRecentFinalDeliveryDedupeForTests(): void {
     recentFinalDeliveryDedupe.clear();
