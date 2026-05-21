@@ -21,11 +21,13 @@ import {
 } from "./dispatch-from-config.shared.test-harness.js";
 
 let dispatchReplyFromConfig: typeof import("./dispatch-from-config.js").dispatchReplyFromConfig;
+let dispatchTesting: typeof import("./dispatch-from-config.js").dispatchFromConfigTesting;
 let resetInboundDedupe: typeof import("./inbound-dedupe.js").resetInboundDedupe;
 
 describe("dispatchReplyFromConfig reply_dispatch hook", () => {
   beforeAll(async () => {
-    ({ dispatchReplyFromConfig } = await import("./dispatch-from-config.js"));
+    ({ dispatchReplyFromConfig, dispatchFromConfigTesting: dispatchTesting } =
+      await import("./dispatch-from-config.js"));
     ({ resetInboundDedupe } = await import("./inbound-dedupe.js"));
   });
 
@@ -33,6 +35,7 @@ describe("dispatchReplyFromConfig reply_dispatch hook", () => {
     clearAgentHarnesses();
     setDiscordTestRegistry();
     resetInboundDedupe();
+    dispatchTesting.resetRecentFinalDeliveryDedupeForTests();
     mocks.routeReply.mockReset().mockResolvedValue({ ok: true, messageId: "mock" });
     mocks.tryFastAbortFromMessage.mockReset().mockResolvedValue({
       handled: false,
@@ -226,5 +229,54 @@ describe("dispatchReplyFromConfig reply_dispatch hook", () => {
     expect(sessionStoreMocks.currentEntry?.pendingFinalDelivery).toBe(true);
     expect(sessionStoreMocks.currentEntry?.pendingFinalDeliveryText).toBe("durable reply");
     expect(sessionStoreMocks.currentEntry?.pendingFinalDeliveryCreatedAt).toBe(1);
+  });
+
+  it("suppresses exact duplicate final replies to the same session briefly", async () => {
+    hookMocks.runner.hasHooks.mockReturnValue(false);
+    const firstDispatcher = createDispatcher();
+
+    const first = await dispatchReplyFromConfig({
+      ctx: createHookCtx(),
+      cfg: emptyConfig,
+      dispatcher: firstDispatcher,
+      replyResolver: async () => ({ text: "same final payload" }),
+    });
+
+    expect(first.queuedFinal).toBe(true);
+    expect(firstDispatcher.sendFinalReply).toHaveBeenCalledOnce();
+
+    const secondDispatcher = createDispatcher();
+    const second = await dispatchReplyFromConfig({
+      ctx: createHookCtx(),
+      cfg: emptyConfig,
+      dispatcher: secondDispatcher,
+      replyResolver: async () => ({ text: "same final payload" }),
+    });
+
+    expect(second.queuedFinal).toBe(true);
+    expect(secondDispatcher.sendFinalReply).not.toHaveBeenCalled();
+  });
+
+  it("allows different final replies in the same session", async () => {
+    hookMocks.runner.hasHooks.mockReturnValue(false);
+    const firstDispatcher = createDispatcher();
+
+    await dispatchReplyFromConfig({
+      ctx: createHookCtx(),
+      cfg: emptyConfig,
+      dispatcher: firstDispatcher,
+      replyResolver: async () => ({ text: "first final payload" }),
+    });
+
+    const secondDispatcher = createDispatcher();
+    await dispatchReplyFromConfig({
+      ctx: createHookCtx(),
+      cfg: emptyConfig,
+      dispatcher: secondDispatcher,
+      replyResolver: async () => ({ text: "second final payload" }),
+    });
+
+    expect(firstDispatcher.sendFinalReply).toHaveBeenCalledOnce();
+    expect(secondDispatcher.sendFinalReply).toHaveBeenCalledOnce();
   });
 });

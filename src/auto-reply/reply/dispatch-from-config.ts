@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
 import { isParentOwnedBackgroundAcpSession } from "../../acp/session-interaction-mode.js";
 import {
@@ -42,6 +43,7 @@ import { isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
 import { measureDiagnosticsTimelineSpan } from "../../infra/diagnostics-timeline.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { getSessionBindingService } from "../../infra/outbound/session-binding-service.js";
+import { logWarn } from "../../logger.js";
 import {
   logMessageProcessed,
   logMessageQueued,
@@ -112,6 +114,120 @@ const runtimePluginsLoader = createLazyImportLoader(() => import("./runtime-plug
 const replyMediaPathsRuntimeLoader = createLazyImportLoader(
   () => import("./reply-media-paths.runtime.js"),
 );
+
+const RECENT_FINAL_DELIVERY_DEDUPE_TTL_MS = 90_000;
+const RECENT_FINAL_DELIVERY_DEDUPE_MAX_ENTRIES = 256;
+const recentFinalDeliveryDedupe = new Map<
+  string,
+  {
+    expiresAt: number;
+    firstSeenAt: number;
+    hash: string;
+    textLength: number;
+  }
+>();
+
+function normalizeFinalDeliveryDedupeText(payload: ReplyPayload): string | undefined {
+  const text = normalizeOptionalString(payload.text)?.replace(/\r\n/g, "\n").trim();
+  return text || undefined;
+}
+
+function createFinalDeliveryDedupeHash(text: string): string {
+  return crypto.createHash("sha256").update(text).digest("hex").slice(0, 12);
+}
+
+function createFinalDeliveryDedupeTargetKey(params: {
+  accountId?: string;
+  channel?: string;
+  sessionKey?: string;
+  threadId?: string | number;
+  to?: string;
+}): string {
+  return [
+    normalizeOptionalString(params.accountId) ?? "default",
+    normalizeOptionalString(params.channel)?.toLowerCase() ?? "unknown",
+    normalizeOptionalString(params.to) ?? "unknown",
+    normalizeOptionalString(
+      params.threadId === undefined || params.threadId === null
+        ? undefined
+        : String(params.threadId),
+    ) ?? "",
+    normalizeOptionalString(params.sessionKey) ?? "",
+  ].join("\u0000");
+}
+
+function pruneRecentFinalDeliveryDedupe(now: number): void {
+  for (const [key, entry] of recentFinalDeliveryDedupe) {
+    if (entry.expiresAt <= now) {
+      recentFinalDeliveryDedupe.delete(key);
+    }
+  }
+  while (recentFinalDeliveryDedupe.size > RECENT_FINAL_DELIVERY_DEDUPE_MAX_ENTRIES) {
+    const oldestKey = recentFinalDeliveryDedupe.keys().next().value as string | undefined;
+    if (!oldestKey) {
+      break;
+    }
+    recentFinalDeliveryDedupe.delete(oldestKey);
+  }
+}
+
+function checkRecentFinalDeliveryDedupe(params: {
+  accountId?: string;
+  channel?: string;
+  now?: number;
+  payload: ReplyPayload;
+  sessionKey?: string;
+  threadId?: string | number;
+  to?: string;
+}):
+  | {
+      shouldSuppress: false;
+      remember: () => void;
+    }
+  | {
+      shouldSuppress: true;
+      hash: string;
+      textLength: number;
+      ageMs: number;
+      targetKey: string;
+    } {
+  const text = normalizeFinalDeliveryDedupeText(params.payload);
+  if (!text) {
+    return { shouldSuppress: false, remember: () => {} };
+  }
+  const now = params.now ?? Date.now();
+  pruneRecentFinalDeliveryDedupe(now);
+  const hash = createFinalDeliveryDedupeHash(text);
+  const targetKey = createFinalDeliveryDedupeTargetKey(params);
+  const key = `${targetKey}\u0000${hash}`;
+  const previous = recentFinalDeliveryDedupe.get(key);
+  if (previous && previous.expiresAt > now) {
+    return {
+      shouldSuppress: true,
+      hash,
+      textLength: text.length,
+      ageMs: Math.max(0, now - previous.firstSeenAt),
+      targetKey,
+    };
+  }
+  return {
+    shouldSuppress: false,
+    remember: () => {
+      recentFinalDeliveryDedupe.set(key, {
+        expiresAt: now + RECENT_FINAL_DELIVERY_DEDUPE_TTL_MS,
+        firstSeenAt: now,
+        hash,
+        textLength: text.length,
+      });
+    },
+  };
+}
+
+export const dispatchFromConfigTesting = {
+  resetRecentFinalDeliveryDedupeForTests(): void {
+    recentFinalDeliveryDedupe.clear();
+  },
+};
 
 function loadRouteReplyRuntime() {
   return routeReplyRuntimeLoader.load();
@@ -1001,12 +1117,31 @@ export async function dispatchReplyFromConfig(
         accountId: replyRoute.accountId,
       });
       const normalizedPayload = await normalizeReplyMediaPayload(ttsPayload);
+      const duplicateFinal = checkRecentFinalDeliveryDedupe({
+        accountId: replyRoute.accountId,
+        channel: deliveryChannel,
+        payload: normalizedPayload,
+        sessionKey: acpDispatchSessionKey ?? sessionKey,
+        threadId: routeThreadId,
+        to: routeReplyTo ?? ctx.To ?? ctx.From,
+      });
+      if (duplicateFinal.shouldSuppress) {
+        logWarn(
+          `delivery: suppressed duplicate final reply hash=${duplicateFinal.hash} len=${duplicateFinal.textLength} ageMs=${duplicateFinal.ageMs} channel=${deliveryChannel ?? "unknown"} session=${acpDispatchSessionKey ?? sessionKey ?? "unknown"}`,
+        );
+        return {
+          queuedFinal: true,
+          routedFinalCount: 0,
+        };
+      }
       const result = await routeReplyToOriginating(normalizedPayload);
       if (result) {
         if (!result.ok) {
           logVerbose(
             `dispatch-from-config: route-reply (final) failed: ${result.error ?? "unknown error"}`,
           );
+        } else {
+          duplicateFinal.remember();
         }
         return {
           queuedFinal: result.ok,
@@ -1014,8 +1149,12 @@ export async function dispatchReplyFromConfig(
         };
       }
       markInboundDedupeReplayUnsafe();
+      const queuedFinal = dispatcher.sendFinalReply(normalizedPayload);
+      if (queuedFinal) {
+        duplicateFinal.remember();
+      }
       return {
-        queuedFinal: dispatcher.sendFinalReply(normalizedPayload),
+        queuedFinal,
         routedFinalCount: 0,
       };
     };
