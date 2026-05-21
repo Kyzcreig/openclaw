@@ -43,6 +43,8 @@ minimumReleaseAgeExclude:
   - "sqlite-vec-*"
 
 nodeLinker: hoisted
+# Baileys pulls libsignal from a pinned GitHub tarball; blocking exotic subdeps breaks WhatsApp restores.
+blockExoticSubdeps: false
 
 overrides:
   "@anthropic-ai/sdk": 0.95.1
