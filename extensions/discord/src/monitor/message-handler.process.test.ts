@@ -11,8 +11,8 @@ const sendMocks = vi.hoisted(() => ({
     (channelId: string, messageId: string, emoji: string, opts?: unknown) => Promise<void>
   >(async () => {}),
 }));
-function createMockDraftStream() {
-  let messageId: string | undefined = "preview-1";
+function createMockDraftStream(options?: { initialMessageId?: string }) {
+  let messageId: string | undefined = options ? options.initialMessageId : "preview-1";
   return {
     update: vi.fn<(text: string) => void>(() => {}),
     flush: vi.fn(async () => {}),
@@ -571,8 +571,8 @@ function expectRemoveAckCallAt(
   expectReactionCallAt(sendMocks.removeReactionDiscord, index, emoji, params);
 }
 
-function createMockDraftStreamForTest() {
-  const draftStream = createMockDraftStream();
+function createMockDraftStreamForTest(options?: { initialMessageId?: string }) {
+  const draftStream = createMockDraftStream(options);
   createDiscordDraftStream.mockReturnValueOnce(draftStream);
   return draftStream;
 }
@@ -1424,6 +1424,33 @@ describe("processDiscordMessage draft streaming", () => {
     expect(draftStream.clear).toHaveBeenCalledTimes(2);
     expect(draftStream.discardPending).not.toHaveBeenCalled();
     expect(deliverDiscordReply).toHaveBeenCalledTimes(1);
+  });
+
+  it("reproduces current orphaned partial preview when finalization has no preview id", async () => {
+    const previewText = "The Phase 5 PRD is already complete and published abo";
+    const finalText =
+      "The Phase 5 PRD is already complete and published above. Here's the link again:";
+    const draftStream = createMockDraftStreamForTest({ initialMessageId: undefined });
+
+    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+      await params?.replyOptions?.onPartialReply?.({ text: previewText });
+      await params?.dispatcher.sendFinalReply({ text: finalText });
+      return { queuedFinal: true, counts: { final: 1, tool: 0, block: 0 } };
+    });
+
+    const ctx = await createAutomaticSourceDeliveryContext({
+      discordConfig: { streamMode: "partial", maxLinesPerMessage: 5 },
+    });
+
+    await runProcessDiscordMessage(ctx);
+
+    expect(draftStream.update).toHaveBeenCalledWith(previewText);
+    expect(editMessageDiscord).not.toHaveBeenCalled();
+    expect(draftStream.clear).toHaveBeenCalled();
+    expect(deliverDiscordReply).toHaveBeenCalledTimes(1);
+    expect(firstMockArg(deliverDiscordReply, "deliverDiscordReply")).toMatchObject({
+      replies: [{ text: finalText }],
+    });
   });
 
   it("uses root discord maxLinesPerMessage for preview finalization when runtime config omits it", async () => {
