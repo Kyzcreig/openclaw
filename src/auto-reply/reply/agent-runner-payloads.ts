@@ -2,6 +2,7 @@ import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-pay
 import type { MessagingToolSend } from "../../agents/pi-embedded-messaging.types.js";
 import type { ReplyToMode } from "../../config/types.js";
 import { logVerbose } from "../../globals.js";
+import { getLogger } from "../../logging/logger.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import { stripLegacyBracketToolCallBlocks } from "../../shared/text/assistant-visible-text.js";
 import { stripHeartbeatToken } from "../heartbeat.js";
@@ -110,6 +111,20 @@ function sanitizeHeartbeatPayload(payload: ReplyPayload): ReplyPayload {
   return copyReplyPayloadMetadata(payload, { ...payload, text: cleaned });
 }
 
+function logPendingBlockStreamFinalSuppression(params: {
+  payloadCount: number;
+  hadBuffered: boolean;
+}) {
+  try {
+    getLogger().warn(
+      { payloadCount: params.payloadCount, hadBuffered: params.hadBuffered },
+      "reply: drained pending block stream before suppressing final payloads",
+    );
+  } catch (err) {
+    logVerbose(`reply pending block-stream suppression warning failed: ${String(err)}`);
+  }
+}
+
 export async function buildReplyPayloads(params: {
   payloads: ReplyPayload[];
   isHeartbeat: boolean;
@@ -208,12 +223,30 @@ export async function buildReplyPayloads(params: {
     silentFilteredPayloads.push(...replyTaggedPayloads);
   }
 
+  const blockPipelineDidStreamBeforeFinalFlush = Boolean(params.blockReplyPipeline?.didStream());
+  const blockPipelineHadBufferedBeforeFinalFlush = Boolean(
+    params.blockReplyPipeline?.hasBuffered(),
+  );
+  if (params.blockStreamingEnabled && params.blockReplyPipeline) {
+    await params.blockReplyPipeline.flush({ force: true });
+  }
+
   // Drop final payloads only when block streaming succeeded end-to-end.
   // If streaming aborted (e.g., timeout), fall back to final payloads.
   const shouldDropFinalPayloads =
     params.blockStreamingEnabled &&
     Boolean(params.blockReplyPipeline?.didStream()) &&
     !params.blockReplyPipeline?.isAborted();
+  if (
+    shouldDropFinalPayloads &&
+    !blockPipelineDidStreamBeforeFinalFlush &&
+    silentFilteredPayloads.length > 0
+  ) {
+    logPendingBlockStreamFinalSuppression({
+      payloadCount: silentFilteredPayloads.length,
+      hadBuffered: blockPipelineHadBufferedBeforeFinalFlush,
+    });
+  }
   const messagingToolSentTexts = params.messagingToolSentTexts ?? [];
   const messagingToolSentTargets = params.messagingToolSentTargets ?? [];
   const shouldCheckMessagingToolDedupe =

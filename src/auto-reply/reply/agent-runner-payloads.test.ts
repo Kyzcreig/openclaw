@@ -482,6 +482,61 @@ describe("buildReplyPayloads media filter integration", () => {
     expect(replyPayloads).toHaveLength(0);
   });
 
+  it("flushes a pending block pipeline before suppressing final payloads", async () => {
+    let didStream = false;
+    let flushCalls = 0;
+    const pipeline: Parameters<typeof buildReplyPayloads>[0]["blockReplyPipeline"] = {
+      didStream: () => didStream,
+      isAborted: () => false,
+      hasSentPayload: () => false,
+      enqueue: () => {},
+      flush: async (options) => {
+        flushCalls += 1;
+        expect(options).toEqual({ force: true });
+        didStream = true;
+      },
+      stop: () => {},
+      hasBuffered: () => false,
+      getSentMediaUrls: () => [],
+    };
+
+    const { replyPayloads } = await buildReplyPayloads({
+      ...baseParams,
+      blockStreamingEnabled: true,
+      blockReplyPipeline: pipeline,
+      payloads: [{ text: "response" }],
+    });
+
+    expect(flushCalls).toBe(1);
+    expect(replyPayloads).toHaveLength(0);
+  });
+
+  it("keeps final payloads when a pending block pipeline flush aborts", async () => {
+    let aborted = false;
+    const pipeline: Parameters<typeof buildReplyPayloads>[0]["blockReplyPipeline"] = {
+      didStream: () => false,
+      isAborted: () => aborted,
+      hasSentPayload: () => false,
+      enqueue: () => {},
+      flush: async () => {
+        aborted = true;
+      },
+      stop: () => {},
+      hasBuffered: () => true,
+      getSentMediaUrls: () => [],
+    };
+
+    const { replyPayloads } = await buildReplyPayloads({
+      ...baseParams,
+      blockStreamingEnabled: true,
+      blockReplyPipeline: pipeline,
+      payloads: [{ text: "response" }],
+    });
+
+    expect(replyPayloads).toHaveLength(1);
+    expect(replyPayloads[0]?.text).toBe("response");
+  });
+
   it("keeps unsent final media after block pipeline streamed the text", async () => {
     const pipeline: Parameters<typeof buildReplyPayloads>[0]["blockReplyPipeline"] = {
       didStream: () => true,
