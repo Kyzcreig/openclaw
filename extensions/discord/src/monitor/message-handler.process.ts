@@ -511,6 +511,7 @@ export async function processDiscordMessage(
               if (isProcessAborted(abortSignal)) {
                 return false;
               }
+              await draftPreview.clearOrphanedPreviewBeforeFinal(finalText);
               const replyToId = replyReference.use();
               notifyFinalReplyStart();
               await deliverDiscordReply({

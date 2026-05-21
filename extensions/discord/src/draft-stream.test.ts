@@ -118,6 +118,8 @@ describe("createDiscordDraftStream", () => {
       channelId: "c1",
       throttleMs: 250,
       botUserId: "bot-1",
+      missingIdRecoveryAttempts: 2,
+      missingIdRecoveryRetryDelayMs: 1,
       warn,
     });
 
@@ -149,6 +151,7 @@ describe("createDiscordDraftStream", () => {
       channelId: "c1",
       throttleMs: 250,
       botUserId: "bot-1",
+      missingIdRecoveryAttempts: 1,
       warn,
     });
 
@@ -158,10 +161,84 @@ describe("createDiscordDraftStream", () => {
     await stream.flush();
 
     expect(warn).toHaveBeenCalledWith(
-      "discord stream preview stopped (missing message id from send)",
+      "discord stream preview stopped (missing message id from send; orphan cleanup armed, textLength=11)",
     );
     expect(rest.patch).not.toHaveBeenCalled();
     expect(stream.messageId()).toBeUndefined();
+  });
+
+  it("deletes a strict-prefix orphaned preview before fallback final delivery", async () => {
+    const warn = vi.fn();
+    const sentAt = Date.now();
+    const rest = {
+      post: vi.fn(async () => ({})),
+      get: vi
+        .fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          {
+            id: "m1",
+            content: "The Phase 5 PRD is already complete and published abo",
+            author: { id: "bot-1", bot: true },
+            timestamp: new Date(sentAt).toISOString(),
+            message_reference: { message_id: "parent-1" },
+          },
+        ]),
+      patch: vi.fn(async () => undefined),
+      delete: vi.fn(async () => undefined),
+    };
+    const stream = createDiscordDraftStream({
+      rest: rest as never,
+      channelId: "c1",
+      throttleMs: 250,
+      botUserId: "bot-1",
+      replyToMessageId: () => "parent-1",
+      missingIdRecoveryAttempts: 1,
+      warn,
+    });
+
+    stream.update("The Phase 5 PRD is already complete and published abo");
+    await stream.flush();
+    await stream.clearOrphanedPreview(
+      "The Phase 5 PRD is already complete and published above. Here's the link again:",
+    );
+
+    expect(rest.delete).toHaveBeenCalledWith(Routes.channelMessage("c1", "m1"));
+    expect(warn).toHaveBeenCalledWith("discord stream preview deleted orphaned preview (m1)");
+  });
+
+  it("refuses orphaned preview cleanup when the recent message is not a strict final prefix", async () => {
+    const warn = vi.fn();
+    const rest = {
+      post: vi.fn(async () => ({})),
+      get: vi
+        .fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          {
+            id: "m1",
+            content: "unrelated preview",
+            author: { id: "bot-1", bot: true },
+            timestamp: new Date().toISOString(),
+          },
+        ]),
+      patch: vi.fn(async () => undefined),
+      delete: vi.fn(async () => undefined),
+    };
+    const stream = createDiscordDraftStream({
+      rest: rest as never,
+      channelId: "c1",
+      throttleMs: 250,
+      botUserId: "bot-1",
+      missingIdRecoveryAttempts: 1,
+      warn,
+    });
+
+    stream.update("unrelated preview");
+    await stream.flush();
+    await stream.clearOrphanedPreview("final answer with different start and enough text");
+
+    expect(rest.delete).not.toHaveBeenCalled();
   });
 
   it("suppresses mentions in preview creates and edits", async () => {

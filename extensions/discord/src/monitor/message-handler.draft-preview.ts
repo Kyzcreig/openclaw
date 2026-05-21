@@ -379,6 +379,12 @@ export function createDiscordDraftPreviewController(params: {
         params.log(`discord: draft cleanup failed: ${String(err)}`);
       }
     },
+    async clearOrphanedPreviewBeforeFinal(finalText?: string) {
+      if (!draftStream || typeof finalText !== "string") {
+        return;
+      }
+      await draftStream.clearOrphanedPreview(finalText);
+    },
   };
 }
 

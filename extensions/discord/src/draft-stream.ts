@@ -14,8 +14,19 @@ const DISCORD_STREAM_MAX_CHARS = 2000;
 const DEFAULT_THROTTLE_MS = 1200;
 const DISCORD_PREVIEW_ALLOWED_MENTIONS = { parse: [] };
 const MISSING_ID_RECOVERY_LIMIT = 10;
+const MISSING_ID_RECOVERY_ATTEMPTS = 5;
 const MISSING_ID_RECOVERY_RETRY_DELAY_MS = 500;
 const MISSING_ID_RECOVERY_WINDOW_MS = 15_000;
+const ORPHAN_CLEANUP_LIMIT = 10;
+const ORPHAN_CLEANUP_WINDOW_MS = 30_000;
+const ORPHAN_CLEANUP_MAX_PREVIEW_CHARS = 300;
+const ORPHAN_CLEANUP_MIN_FINAL_DELTA_CHARS = 20;
+
+type OrphanedPreviewCandidate = {
+  text: string;
+  sentAtMs: number;
+  replyToMessageId?: string;
+};
 
 type DiscordDraftStream = {
   update: (text: string) => void;
@@ -27,6 +38,8 @@ type DiscordDraftStream = {
   stop: () => Promise<void>;
   /** Reset internal state so the next update creates a new message instead of editing. */
   forceNewMessage: () => void;
+  /** Best-effort cleanup for a preview that Discord may have accepted but did not return an id for. */
+  clearOrphanedPreview: (finalText: string) => Promise<void>;
 };
 
 export function createDiscordDraftStream(params: {
@@ -38,6 +51,8 @@ export function createDiscordDraftStream(params: {
   throttleMs?: number;
   /** Minimum chars before sending first message (debounce for push notifications) */
   minInitialChars?: number;
+  missingIdRecoveryAttempts?: number;
+  missingIdRecoveryRetryDelayMs?: number;
   log?: (message: string) => void;
   warn?: (message: string) => void;
 }): DiscordDraftStream {
@@ -54,6 +69,7 @@ export function createDiscordDraftStream(params: {
   const streamState = { stopped: false, final: false };
   let streamMessageId: string | undefined;
   let lastSentText = "";
+  let orphanedPreviewCandidate: OrphanedPreviewCandidate | undefined;
 
   const sendOrEditStreamMessage = async (text: string): Promise<boolean> => {
     // Allow final flush even if stopped (e.g., after clear()).
@@ -113,20 +129,31 @@ export function createDiscordDraftStream(params: {
           ...(params.botUserId ? { botUserId: params.botUserId } : {}),
           ...(replyToMessageId ? { replyToMessageId } : {}),
           sentAtMs: sendStartedAtMs,
+          attempts: params.missingIdRecoveryAttempts ?? MISSING_ID_RECOVERY_ATTEMPTS,
+          retryDelayMs: params.missingIdRecoveryRetryDelayMs ?? MISSING_ID_RECOVERY_RETRY_DELAY_MS,
           ...(params.warn ? { warn: params.warn } : {}),
         });
         if (recoveredMessageId) {
           streamMessageId = recoveredMessageId;
+          orphanedPreviewCandidate = undefined;
           params.warn?.(
             `discord stream preview recovered missing message id (${recoveredMessageId})`,
           );
           return true;
         }
+        orphanedPreviewCandidate = {
+          text: trimmed,
+          sentAtMs: sendStartedAtMs,
+          ...(replyToMessageId ? { replyToMessageId } : {}),
+        };
         streamState.stopped = true;
-        params.warn?.("discord stream preview stopped (missing message id from send)");
+        params.warn?.(
+          `discord stream preview stopped (missing message id from send; orphan cleanup armed, textLength=${trimmed.length})`,
+        );
         return false;
       }
       streamMessageId = sentMessageId;
+      orphanedPreviewCandidate = undefined;
       return true;
     } catch (err) {
       streamState.stopped = true;
@@ -162,6 +189,40 @@ export function createDiscordDraftStream(params: {
     loop.resetPending();
   };
 
+  const clearOrphanedPreview = async (finalText: string): Promise<void> => {
+    if (streamMessageId || !orphanedPreviewCandidate) {
+      return;
+    }
+    const candidate = orphanedPreviewCandidate;
+    const normalizedFinalText = finalText.trimEnd();
+    if (!isStrictFinalPrefix(candidate.text, normalizedFinalText)) {
+      return;
+    }
+    try {
+      const messages = await listChannelMessages(rest, channelId, {
+        limit: ORPHAN_CLEANUP_LIMIT,
+      });
+      const message = messages.find((entry) =>
+        isRecoverableOrphanedPreviewMessage(entry, {
+          ...candidate,
+          finalText: normalizedFinalText,
+          ...(params.botUserId ? { botUserId: params.botUserId } : {}),
+        }),
+      );
+      if (!message?.id) {
+        params.warn?.(
+          `discord stream preview orphan cleanup missed (textLength=${candidate.text.length})`,
+        );
+        return;
+      }
+      await deleteChannelMessage(rest, channelId, message.id);
+      orphanedPreviewCandidate = undefined;
+      params.warn?.(`discord stream preview deleted orphaned preview (${message.id})`);
+    } catch (err) {
+      params.warn?.(`discord stream preview orphan cleanup failed: ${formatErrorMessage(err)}`);
+    }
+  };
+
   params.log?.(`discord stream preview ready (maxChars=${maxChars}, throttleMs=${throttleMs})`);
 
   return {
@@ -173,6 +234,7 @@ export function createDiscordDraftStream(params: {
     seal,
     stop,
     forceNewMessage,
+    clearOrphanedPreview,
   };
 }
 
@@ -183,15 +245,22 @@ async function recoverMissingPreviewMessageId(params: {
   botUserId?: string;
   replyToMessageId?: string;
   sentAtMs: number;
+  attempts: number;
+  retryDelayMs: number;
   warn?: (message: string) => void;
 }): Promise<string | undefined> {
   try {
-    const firstMatch = await findRecentPreviewMessageId(params);
-    if (firstMatch) {
-      return firstMatch;
+    const attempts = Math.max(1, Math.floor(params.attempts));
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const match = await findRecentPreviewMessageId(params);
+      if (match) {
+        return match;
+      }
+      if (attempt < attempts - 1) {
+        await sleep(params.retryDelayMs);
+      }
     }
-    await sleep(MISSING_ID_RECOVERY_RETRY_DELAY_MS);
-    return await findRecentPreviewMessageId(params);
+    return undefined;
   } catch (err) {
     params.warn?.(`discord stream preview id recovery failed: ${formatErrorMessage(err)}`);
     return undefined;
@@ -251,4 +320,49 @@ function isRecoverablePreviewMessage(
   // fails to surface the created id. Recovering the id lets final delivery edit
   // that same preview instead of sending a second final message.
   return Math.abs(timestampMs - params.sentAtMs) <= MISSING_ID_RECOVERY_WINDOW_MS;
+}
+
+function isStrictFinalPrefix(previewText: string, finalText: string): boolean {
+  const trimmedPreview = previewText.trimEnd();
+  return (
+    trimmedPreview.length > 0 &&
+    trimmedPreview.length <= ORPHAN_CLEANUP_MAX_PREVIEW_CHARS &&
+    finalText.startsWith(trimmedPreview) &&
+    finalText.length >= trimmedPreview.length + ORPHAN_CLEANUP_MIN_FINAL_DELTA_CHARS
+  );
+}
+
+function isRecoverableOrphanedPreviewMessage(
+  message: APIMessage,
+  params: OrphanedPreviewCandidate & {
+    finalText: string;
+    botUserId?: string;
+  },
+): boolean {
+  if (!message.id || message.content !== params.text) {
+    return false;
+  }
+  if (!isStrictFinalPrefix(message.content, params.finalText)) {
+    return false;
+  }
+  const authorId = message.author?.id;
+  const authorMatches =
+    params.botUserId !== undefined ? authorId === params.botUserId : message.author?.bot === true;
+  if (!authorMatches) {
+    return false;
+  }
+  if (
+    params.replyToMessageId &&
+    message.message_reference?.message_id !== params.replyToMessageId
+  ) {
+    return false;
+  }
+  if ((message.attachments?.length ?? 0) > 0 || (message.embeds?.length ?? 0) > 0) {
+    return false;
+  }
+  const timestampMs = Date.parse(message.timestamp);
+  if (!Number.isFinite(timestampMs)) {
+    return false;
+  }
+  return Math.abs(timestampMs - params.sentAtMs) <= ORPHAN_CLEANUP_WINDOW_MS;
 }

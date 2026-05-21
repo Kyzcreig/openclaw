@@ -24,6 +24,7 @@ function createMockDraftStream(options?: { initialMessageId?: string }) {
     seal: vi.fn(async () => {}),
     stop: vi.fn(async () => {}),
     forceNewMessage: vi.fn(() => {}),
+    clearOrphanedPreview: vi.fn(async () => {}),
   };
 }
 
@@ -1426,7 +1427,7 @@ describe("processDiscordMessage draft streaming", () => {
     expect(deliverDiscordReply).toHaveBeenCalledTimes(1);
   });
 
-  it("reproduces current orphaned partial preview when finalization has no preview id", async () => {
+  it("cleans orphaned partial preview before final fallback when finalization has no preview id", async () => {
     const previewText = "The Phase 5 PRD is already complete and published abo";
     const finalText =
       "The Phase 5 PRD is already complete and published above. Here's the link again:";
@@ -1447,6 +1448,7 @@ describe("processDiscordMessage draft streaming", () => {
     expect(draftStream.update).toHaveBeenCalledWith(previewText);
     expect(editMessageDiscord).not.toHaveBeenCalled();
     expect(draftStream.clear).toHaveBeenCalled();
+    expect(draftStream.clearOrphanedPreview).toHaveBeenCalledWith(finalText);
     expect(deliverDiscordReply).toHaveBeenCalledTimes(1);
     expect(firstMockArg(deliverDiscordReply, "deliverDiscordReply")).toMatchObject({
       replies: [{ text: finalText }],
