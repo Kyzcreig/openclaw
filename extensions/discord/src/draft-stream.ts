@@ -14,6 +14,7 @@ const DISCORD_STREAM_MAX_CHARS = 2000;
 const DEFAULT_THROTTLE_MS = 1200;
 const DISCORD_PREVIEW_ALLOWED_MENTIONS = { parse: [] };
 const MISSING_ID_RECOVERY_LIMIT = 10;
+const MISSING_ID_RECOVERY_RETRY_DELAY_MS = 500;
 const MISSING_ID_RECOVERY_WINDOW_MS = 15_000;
 
 type DiscordDraftStream = {
@@ -185,14 +186,36 @@ async function recoverMissingPreviewMessageId(params: {
   warn?: (message: string) => void;
 }): Promise<string | undefined> {
   try {
-    const messages = await listChannelMessages(params.rest, params.channelId, {
-      limit: MISSING_ID_RECOVERY_LIMIT,
-    });
-    return messages.find((message) => isRecoverablePreviewMessage(message, params))?.id;
+    const firstMatch = await findRecentPreviewMessageId(params);
+    if (firstMatch) {
+      return firstMatch;
+    }
+    await sleep(MISSING_ID_RECOVERY_RETRY_DELAY_MS);
+    return await findRecentPreviewMessageId(params);
   } catch (err) {
     params.warn?.(`discord stream preview id recovery failed: ${formatErrorMessage(err)}`);
     return undefined;
   }
+}
+
+async function findRecentPreviewMessageId(params: {
+  rest: RequestClient;
+  channelId: string;
+  text: string;
+  botUserId?: string;
+  replyToMessageId?: string;
+  sentAtMs: number;
+}): Promise<string | undefined> {
+  const messages = await listChannelMessages(params.rest, params.channelId, {
+    limit: MISSING_ID_RECOVERY_LIMIT,
+  });
+  return messages.find((message) => isRecoverablePreviewMessage(message, params))?.id;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function isRecoverablePreviewMessage(

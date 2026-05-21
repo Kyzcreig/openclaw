@@ -95,6 +95,40 @@ describe("createDiscordDraftStream", () => {
     expect(stream.messageId()).toBe("m1");
   });
 
+  it("retries missing create id recovery once when Discord history is not caught up", async () => {
+    const warn = vi.fn();
+    const rest = {
+      post: vi.fn(async () => ({})),
+      get: vi
+        .fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          {
+            id: "m1",
+            content: "first draft",
+            author: { id: "bot-1", bot: true },
+            timestamp: new Date().toISOString(),
+          },
+        ]),
+      patch: vi.fn(async () => undefined),
+      delete: vi.fn(async () => undefined),
+    };
+    const stream = createDiscordDraftStream({
+      rest: rest as never,
+      channelId: "c1",
+      throttleMs: 250,
+      botUserId: "bot-1",
+      warn,
+    });
+
+    stream.update("first draft");
+    await stream.flush();
+
+    expect(rest.get).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledWith("discord stream preview recovered missing message id (m1)");
+    expect(stream.messageId()).toBe("m1");
+  });
+
   it("stops previewing when missing create id recovery cannot verify a sent preview", async () => {
     const warn = vi.fn();
     const rest = {
