@@ -1,9 +1,11 @@
+import type { APIMessage } from "discord-api-types/v10";
 import { createFinalizableDraftLifecycle } from "openclaw/plugin-sdk/channel-lifecycle";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import {
   createChannelMessage,
   deleteChannelMessage,
   editChannelMessage,
+  listChannelMessages,
   type RequestClient,
 } from "./internal/discord.js";
 
@@ -11,6 +13,8 @@ import {
 const DISCORD_STREAM_MAX_CHARS = 2000;
 const DEFAULT_THROTTLE_MS = 1200;
 const DISCORD_PREVIEW_ALLOWED_MENTIONS = { parse: [] };
+const MISSING_ID_RECOVERY_LIMIT = 10;
+const MISSING_ID_RECOVERY_WINDOW_MS = 15_000;
 
 type DiscordDraftStream = {
   update: (text: string) => void;
@@ -29,6 +33,7 @@ export function createDiscordDraftStream(params: {
   channelId: string;
   maxChars?: number;
   replyToMessageId?: string | (() => string | undefined);
+  botUserId?: string;
   throttleMs?: number;
   /** Minimum chars before sending first message (debounce for push notifications) */
   minInitialChars?: number;
@@ -90,6 +95,7 @@ export function createDiscordDraftStream(params: {
       const messageReference = replyToMessageId
         ? { message_id: replyToMessageId, fail_if_not_exists: false }
         : undefined;
+      const sendStartedAtMs = Date.now();
       const sent = await createChannelMessage<{ id?: string }>(rest, channelId, {
         body: {
           content: trimmed,
@@ -99,6 +105,22 @@ export function createDiscordDraftStream(params: {
       });
       const sentMessageId = sent?.id;
       if (typeof sentMessageId !== "string" || !sentMessageId) {
+        const recoveredMessageId = await recoverMissingPreviewMessageId({
+          rest,
+          channelId,
+          text: trimmed,
+          ...(params.botUserId ? { botUserId: params.botUserId } : {}),
+          ...(replyToMessageId ? { replyToMessageId } : {}),
+          sentAtMs: sendStartedAtMs,
+          ...(params.warn ? { warn: params.warn } : {}),
+        });
+        if (recoveredMessageId) {
+          streamMessageId = recoveredMessageId;
+          params.warn?.(
+            `discord stream preview recovered missing message id (${recoveredMessageId})`,
+          );
+          return true;
+        }
         streamState.stopped = true;
         params.warn?.("discord stream preview stopped (missing message id from send)");
         return false;
@@ -151,4 +173,59 @@ export function createDiscordDraftStream(params: {
     stop,
     forceNewMessage,
   };
+}
+
+async function recoverMissingPreviewMessageId(params: {
+  rest: RequestClient;
+  channelId: string;
+  text: string;
+  botUserId?: string;
+  replyToMessageId?: string;
+  sentAtMs: number;
+  warn?: (message: string) => void;
+}): Promise<string | undefined> {
+  try {
+    const messages = await listChannelMessages(params.rest, params.channelId, {
+      limit: MISSING_ID_RECOVERY_LIMIT,
+    });
+    return messages.find((message) => isRecoverablePreviewMessage(message, params))?.id;
+  } catch (err) {
+    params.warn?.(`discord stream preview id recovery failed: ${formatErrorMessage(err)}`);
+    return undefined;
+  }
+}
+
+function isRecoverablePreviewMessage(
+  message: APIMessage,
+  params: {
+    text: string;
+    botUserId?: string;
+    replyToMessageId?: string;
+    sentAtMs: number;
+  },
+): boolean {
+  if (!message.id || message.content !== params.text) {
+    return false;
+  }
+  const authorId = message.author?.id;
+  const authorMatches =
+    params.botUserId !== undefined ? authorId === params.botUserId : message.author?.bot === true;
+  if (!authorMatches) {
+    return false;
+  }
+  if (
+    params.replyToMessageId &&
+    message.message_reference?.message_id !== params.replyToMessageId
+  ) {
+    return false;
+  }
+  const timestampMs = Date.parse(message.timestamp);
+  if (!Number.isFinite(timestampMs)) {
+    return false;
+  }
+
+  // Discord can visibly create the preview message even when our request path
+  // fails to surface the created id. Recovering the id lets final delivery edit
+  // that same preview instead of sending a second final message.
+  return Math.abs(timestampMs - params.sentAtMs) <= MISSING_ID_RECOVERY_WINDOW_MS;
 }

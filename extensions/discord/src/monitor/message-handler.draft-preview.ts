@@ -35,6 +35,7 @@ export function createDiscordDraftPreviewController(params: {
   textLimit: number;
   deliveryRest: RequestClient;
   deliverChannelId: string;
+  botUserId?: string;
   replyReference: DraftReplyReference;
   tableMode: Parameters<typeof convertMarkdownTables>[1];
   maxLinesPerMessage: number | undefined;
@@ -54,6 +55,7 @@ export function createDiscordDraftPreviewController(params: {
     ? createDiscordDraftStream({
         rest: params.deliveryRest,
         channelId: params.deliverChannelId,
+        ...(params.botUserId ? { botUserId: params.botUserId } : {}),
         maxChars: draftMaxChars,
         replyToMessageId: () => params.replyReference.peek(),
         minInitialChars: discordStreamMode === "progress" ? 0 : 30,

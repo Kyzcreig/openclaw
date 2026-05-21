@@ -172,6 +172,10 @@ Discord:
 - `block` mode uses draft chunking (`draftChunk`).
 - Preview streaming is skipped when Discord block streaming is explicitly enabled.
 - Final media, error, and explicit-reply payloads cancel pending previews without flushing a new draft, then use normal delivery.
+- If Discord creates a preview but the create response does not expose a message
+  id, OpenClaw looks up the recent matching bot message and recovers its id
+  before finalizing. This prevents a visible preview plus a separate final
+  duplicate without changing the model text stream.
 
 Slack:
 

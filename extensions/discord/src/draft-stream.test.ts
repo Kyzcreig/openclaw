@@ -57,6 +57,79 @@ describe("createDiscordDraftStream", () => {
     expect(stream.messageId()).toBe("m1");
   });
 
+  it("recovers a missing create id from recent matching bot messages", async () => {
+    const warn = vi.fn();
+    const rest = {
+      post: vi.fn(async () => ({})),
+      get: vi.fn(async () => [
+        {
+          id: "m1",
+          content: "first draft",
+          author: { id: "bot-1", bot: true },
+          timestamp: new Date().toISOString(),
+          message_reference: { message_id: "parent-1" },
+        },
+      ]),
+      patch: vi.fn(async () => undefined),
+      delete: vi.fn(async () => undefined),
+    };
+    const stream = createDiscordDraftStream({
+      rest: rest as never,
+      channelId: "c1",
+      throttleMs: 250,
+      botUserId: "bot-1",
+      replyToMessageId: () => "parent-1",
+      warn,
+    });
+
+    stream.update("first draft");
+    await stream.flush();
+    stream.update("second draft");
+    await stream.flush();
+
+    expect(rest.get).toHaveBeenCalledWith(Routes.channelMessages("c1"), { limit: 10 });
+    expect(warn).toHaveBeenCalledWith("discord stream preview recovered missing message id (m1)");
+    expect(rest.patch).toHaveBeenCalledWith(Routes.channelMessage("c1", "m1"), {
+      body: { content: "second draft", allowed_mentions: { parse: [] } },
+    });
+    expect(stream.messageId()).toBe("m1");
+  });
+
+  it("stops previewing when missing create id recovery cannot verify a sent preview", async () => {
+    const warn = vi.fn();
+    const rest = {
+      post: vi.fn(async () => ({})),
+      get: vi.fn(async () => [
+        {
+          id: "other",
+          content: "first draft",
+          author: { id: "someone-else", bot: true },
+          timestamp: new Date().toISOString(),
+        },
+      ]),
+      patch: vi.fn(async () => undefined),
+      delete: vi.fn(async () => undefined),
+    };
+    const stream = createDiscordDraftStream({
+      rest: rest as never,
+      channelId: "c1",
+      throttleMs: 250,
+      botUserId: "bot-1",
+      warn,
+    });
+
+    stream.update("first draft");
+    await stream.flush();
+    stream.update("second draft");
+    await stream.flush();
+
+    expect(warn).toHaveBeenCalledWith(
+      "discord stream preview stopped (missing message id from send)",
+    );
+    expect(rest.patch).not.toHaveBeenCalled();
+    expect(stream.messageId()).toBeUndefined();
+  });
+
   it("suppresses mentions in preview creates and edits", async () => {
     const rest = {
       post: vi.fn(async () => ({ id: "m1" })),

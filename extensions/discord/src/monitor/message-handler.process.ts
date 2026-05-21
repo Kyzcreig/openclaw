@@ -411,6 +411,7 @@ export async function processDiscordMessage(
     textLimit,
     deliveryRest,
     deliverChannelId,
+    ...(ctx.botUserId ? { botUserId: ctx.botUserId } : {}),
     replyReference,
     tableMode,
     maxLinesPerMessage,
