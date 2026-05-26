@@ -47,6 +47,8 @@ const OVERLOADED_ERROR_USER_MESSAGE =
   "The AI service is temporarily overloaded. Please try again in a moment.";
 const FINAL_TAG_RE = /<\s*\/?\s*final\s*>/gi;
 const TOOL_CALLS_OMITTED_PLACEHOLDER_LINE_RE = /^[ \t]*\[tool calls omitted\][ \t]*$/i;
+const MEDIA_ATTACHED_SCAFFOLD_LINE_RE =
+  /^[ \t]*\[media attached(?:\s+\d+\/\d+)?\s*:\s*[^\]\r\n]*\][ \t]*$/i;
 const ERROR_PREFIX_RE =
   /^(?:error|(?:[a-z][\w-]*\s+)?api\s*error|openai\s*error|anthropic\s*error|gateway\s*error|codex\s*error|request failed|failed|exception)(?:\s+\d{3})?[:\s-]+/i;
 const CONTEXT_OVERFLOW_ERROR_HEAD_RE =
@@ -339,6 +341,14 @@ function stripFinalTagsFromText(text: unknown): string {
 }
 
 function stripToolCallsOmittedPlaceholderLines(text: string): string {
+  return stripStandaloneLinesMatching(text, TOOL_CALLS_OMITTED_PLACEHOLDER_LINE_RE);
+}
+
+function stripMediaAttachedScaffoldLines(text: string): string {
+  return stripStandaloneLinesMatching(text, MEDIA_ATTACHED_SCAFFOLD_LINE_RE);
+}
+
+function stripStandaloneLinesMatching(text: string, pattern: RegExp): string {
   let result = "";
   let start = 0;
   while (start < text.length) {
@@ -346,7 +356,7 @@ function stripToolCallsOmittedPlaceholderLines(text: string): string {
     const end = newlineIndex === -1 ? text.length : newlineIndex + 1;
     const chunk = text.slice(start, end);
     const line = chunk.endsWith("\n") ? chunk.slice(0, -1).replace(/\r$/, "") : chunk;
-    if (!TOOL_CALLS_OMITTED_PLACEHOLDER_LINE_RE.test(line)) {
+    if (!pattern.test(line)) {
       result += chunk;
     }
     start = end;
@@ -412,7 +422,8 @@ export function sanitizeUserFacingText(text: unknown, opts?: { errorContext?: bo
   // It is internal scaffolding, so drop standalone placeholder lines before delivery
   // while preserving ordinary inline mentions a user may be discussing.
   const withoutPlaceholder = stripToolCallsOmittedPlaceholderLines(withoutToolCallXml);
-  const withoutToolCallBlocks = stripLegacyBracketToolCallBlocks(withoutPlaceholder);
+  const withoutMediaScaffold = stripMediaAttachedScaffoldLines(withoutPlaceholder);
+  const withoutToolCallBlocks = stripLegacyBracketToolCallBlocks(withoutMediaScaffold);
   const trimmed = withoutToolCallBlocks.trim();
   if (!trimmed) {
     return "";

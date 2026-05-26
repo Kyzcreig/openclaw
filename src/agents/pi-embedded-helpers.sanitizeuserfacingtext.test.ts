@@ -217,6 +217,30 @@ describe("sanitizeUserFacingText", () => {
     expect(sanitizeUserFacingText("A\n[tool calls omitted]\n[tool calls omitted]\nB")).toBe("A\nB");
   });
 
+  it("strips leaked media attachment scaffold lines before user-facing delivery", () => {
+    expect(
+      sanitizeUserFacingText(
+        "[media attached: <attachment_id_1>, <attachment_id_2>, <attachment_id_3>]\n\nGood catch.",
+      ),
+    ).toBe("Good catch.");
+    expect(
+      sanitizeUserFacingText(
+        [
+          "[media attached: 2 files]",
+          "[media attached 1/2: /tmp/a.png (image/png) | /tmp/a.png]",
+          "[media attached 2/2: /tmp/b.jpg (image/jpeg) | /tmp/b.jpg]",
+          "",
+          "Actual reply.",
+        ].join("\n"),
+      ),
+    ).toBe("Actual reply.");
+  });
+
+  it("preserves inline discussion of media attachment syntax", () => {
+    const text = "The leaked text looked like `[media attached: <attachment_id_1>]`.";
+    expect(sanitizeUserFacingText(text)).toBe(text);
+  });
+
   it("strips legacy uppercase TOOL_CALL blocks before user-facing delivery", () => {
     const input = [
       "Before",
