@@ -745,6 +745,9 @@ export async function processDiscordMessage(
             Boolean(payload.replyToTag || payload.replyToCurrent) ||
             (typeof finalText === "string" && /\[\[\s*reply_to(?:_current|\s*:)/i.test(finalText));
           const previewMessageId = draftStream.messageId();
+          const currentPreviewText = (
+            discordStreamMode === "block" ? draftText : lastPartialText
+          ).trim();
 
           // Try to finalize via preview edit (text-only, fits in 2000 chars, not an error)
           const canFinalizeViaPreviewEdit =
@@ -758,6 +761,12 @@ export async function processDiscordMessage(
           if (canFinalizeViaPreviewEdit) {
             await draftStream.stop();
             if (isProcessAborted(abortSignal)) {
+              return;
+            }
+            if (currentPreviewText && currentPreviewText === previewFinalText) {
+              finalizedViaPreviewMessage = true;
+              replyReference.markSent();
+              observer?.onFinalReplyDelivered?.();
               return;
             }
             try {

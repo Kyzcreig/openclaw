@@ -726,6 +726,27 @@ describe("processDiscordMessage draft streaming", () => {
     expectSinglePreviewEdit();
   });
 
+  it("treats an exact streamed preview as delivered final without resending", async () => {
+    const draftStream = createMockDraftStreamForTest();
+
+    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+      await params?.replyOptions?.onPartialReply?.({ text: "Hello\nWorld" });
+      await params?.dispatcher.sendFinalReply({ text: "Hello\nWorld" });
+      return { queuedFinal: true, counts: { final: 1, tool: 0, block: 0 } };
+    });
+
+    const ctx = await createBaseContext({
+      discordConfig: { streamMode: "partial", maxLinesPerMessage: 5 },
+    });
+
+    await processDiscordMessage(ctx as any);
+
+    expect(draftStream.update).toHaveBeenCalledWith("Hello\nWorld");
+    expect(draftStream.stop).toHaveBeenCalled();
+    expect(editMessageDiscord).not.toHaveBeenCalled();
+    expect(deliverDiscordReply).not.toHaveBeenCalled();
+  });
+
   it("accepts streaming=true alias for partial preview mode", async () => {
     await runSingleChunkFinalScenario({ streaming: true, maxLinesPerMessage: 5 });
     expectSinglePreviewEdit();
