@@ -63,6 +63,7 @@ export async function compactEmbeddedPiSession(
         const agentDir = params.agentDir ?? resolveOpenClawAgentDir();
         const resolvedCompactionTarget = resolveEmbeddedCompactionTarget({
           config: params.config,
+          sessionKey: params.sessionKey,
           provider: params.provider,
           modelId: params.model,
           authProfileId: params.authProfileId,
@@ -134,6 +135,8 @@ export async function compactEmbeddedPiSession(
             senderId: params.senderId,
             provider: params.provider,
             modelId: params.model,
+            defaultProvider: DEFAULT_PROVIDER,
+            defaultModel: DEFAULT_MODEL,
             thinkLevel: params.thinkLevel,
             reasoningLevel: params.reasoningLevel,
             bashElevated: params.bashElevated,

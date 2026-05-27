@@ -1,5 +1,6 @@
 import type { ReasoningLevel, ThinkLevel } from "../../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { resolveAgentEffectiveModelPrimary, resolveSessionAgentIds } from "../agent-scope.js";
 import type { ExecElevatedDefaults } from "../bash-tools.js";
 import type { SkillSnapshot } from "../skills.js";
 
@@ -27,44 +28,119 @@ export type EmbeddedCompactionRuntimeContext = {
   ownerNumbers?: string[];
 };
 
+function resolveModelRef(
+  value: string | undefined,
+  defaultProvider: string | undefined,
+): { provider: string | undefined; model: string | undefined } | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const slashIdx = trimmed.indexOf("/");
+  if (slashIdx > 0) {
+    const provider = trimmed.slice(0, slashIdx).trim();
+    const model = trimmed.slice(slashIdx + 1).trim();
+    if (!provider || !model) {
+      return undefined;
+    }
+    return { provider, model };
+  }
+  return { provider: defaultProvider, model: trimmed };
+}
+
+function resolvePrimaryAgentCompactionTarget(params: {
+  config?: OpenClawConfig;
+  sessionKey?: string | null;
+  defaultProvider?: string;
+}): { provider: string | undefined; model: string | undefined } | undefined {
+  if (!params.config) {
+    return undefined;
+  }
+  const { sessionAgentId } = resolveSessionAgentIds({
+    sessionKey: params.sessionKey ?? undefined,
+    config: params.config,
+  });
+  return resolveModelRef(
+    resolveAgentEffectiveModelPrimary(params.config, sessionAgentId),
+    params.defaultProvider,
+  );
+}
+
+function resolveTargetAuthProfile(params: {
+  targetProvider: string | undefined;
+  currentProvider: string | undefined;
+  authProfileId?: string | null;
+}): string | undefined {
+  if (
+    params.targetProvider &&
+    params.currentProvider &&
+    params.targetProvider !== params.currentProvider
+  ) {
+    return undefined;
+  }
+  return params.authProfileId ?? undefined;
+}
+
 /**
  * Resolve the effective compaction target from config, falling back to the
- * caller-supplied provider/model and optionally applying runtime defaults.
+ * primary agent model, then runtime defaults, then the caller-supplied model.
  */
 export function resolveEmbeddedCompactionTarget(params: {
   config?: OpenClawConfig;
+  sessionKey?: string | null;
   provider?: string | null;
   modelId?: string | null;
   authProfileId?: string | null;
   defaultProvider?: string;
   defaultModel?: string;
 }): { provider: string | undefined; model: string | undefined; authProfileId: string | undefined } {
-  const provider = params.provider?.trim() || params.defaultProvider;
-  const model = params.modelId?.trim() || params.defaultModel;
+  const currentProvider = params.provider?.trim();
+  const currentModel = params.modelId?.trim();
+  const defaultProvider = params.defaultProvider?.trim() || currentProvider;
+  const defaultModel = params.defaultModel?.trim() || currentModel;
+  const primaryAgentTarget = resolvePrimaryAgentCompactionTarget({
+    config: params.config,
+    sessionKey: params.sessionKey,
+    defaultProvider,
+  });
+  const provider = primaryAgentTarget?.provider ?? defaultProvider;
+  const model = primaryAgentTarget?.model ?? defaultModel;
   const override = params.config?.agents?.defaults?.compaction?.model?.trim();
   if (!override) {
     return {
       provider,
       model,
-      authProfileId: params.authProfileId ?? undefined,
+      authProfileId: resolveTargetAuthProfile({
+        targetProvider: provider,
+        currentProvider,
+        authProfileId: params.authProfileId,
+      }),
     };
   }
   const slashIdx = override.indexOf("/");
   if (slashIdx > 0) {
     const overrideProvider = override.slice(0, slashIdx).trim();
-    const overrideModel = override.slice(slashIdx + 1).trim() || params.defaultModel;
+    const overrideModel = override.slice(slashIdx + 1).trim() || defaultModel;
     // When switching provider via override, drop the primary auth profile to
     // avoid sending the wrong credentials.
-    const authProfileId =
-      overrideProvider !== (params.provider ?? "")?.trim()
-        ? undefined
-        : (params.authProfileId ?? undefined);
-    return { provider: overrideProvider, model: overrideModel, authProfileId };
+    return {
+      provider: overrideProvider,
+      model: overrideModel,
+      authProfileId: resolveTargetAuthProfile({
+        targetProvider: overrideProvider,
+        currentProvider,
+        authProfileId: params.authProfileId,
+      }),
+    };
   }
   return {
     provider,
     model: override,
-    authProfileId: params.authProfileId ?? undefined,
+    authProfileId: resolveTargetAuthProfile({
+      targetProvider: provider,
+      currentProvider,
+      authProfileId: params.authProfileId,
+    }),
   };
 }
 
@@ -90,12 +166,17 @@ export function buildEmbeddedCompactionRuntimeContext(params: {
   bashElevated?: ExecElevatedDefaults;
   extraSystemPrompt?: string;
   ownerNumbers?: string[];
+  defaultProvider?: string;
+  defaultModel?: string;
 }): EmbeddedCompactionRuntimeContext {
   const resolved = resolveEmbeddedCompactionTarget({
     config: params.config,
+    sessionKey: params.sessionKey,
     provider: params.provider,
     modelId: params.modelId,
     authProfileId: params.authProfileId,
+    defaultProvider: params.defaultProvider,
+    defaultModel: params.defaultModel,
   });
   return {
     sessionKey: params.sessionKey ?? undefined,

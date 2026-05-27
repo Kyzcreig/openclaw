@@ -112,18 +112,51 @@ describe("buildEmbeddedCompactionRuntimeContext", () => {
     expect(result.authProfileId).toBe("openai:p1");
   });
 
-  it("uses session model when no compaction.model override configured", () => {
+  it("uses primary agent model when no compaction.model override configured", () => {
     const result = buildEmbeddedCompactionRuntimeContext({
       workspaceDir: "/tmp/workspace",
       agentDir: "/tmp/agent",
-      config: {} as OpenClawConfig,
-      provider: "ollama",
-      modelId: "minimax-m2.7:cloud",
-      authProfileId: "ollama:default",
+      config: {
+        agents: {
+          defaults: {
+            model: { primary: "openai-codex/gpt-5.5" },
+          },
+        },
+      } as OpenClawConfig,
+      provider: "openrouter",
+      modelId: "minimax/minimax-m2.5",
+      authProfileId: "openrouter:default",
     });
-    expect(result.provider).toBe("ollama");
-    expect(result.model).toBe("minimax-m2.7:cloud");
-    expect(result.authProfileId).toBe("ollama:default");
+    expect(result.provider).toBe("openai-codex");
+    expect(result.model).toBe("gpt-5.5");
+    expect(result.authProfileId).toBeUndefined();
+  });
+
+  it("uses the session agent primary model instead of a heartbeat run model", () => {
+    const result = buildEmbeddedCompactionRuntimeContext({
+      sessionKey: "agent:bastion:telegram:default:direct:571820863",
+      workspaceDir: "/tmp/workspace",
+      agentDir: "/tmp/agent",
+      config: {
+        agents: {
+          defaults: {
+            model: { primary: "openai-codex/gpt-5.4" },
+          },
+          list: [
+            {
+              id: "bastion",
+              model: { primary: "openai-codex/gpt-5.5" },
+            },
+          ],
+        },
+      } as OpenClawConfig,
+      provider: "openrouter",
+      modelId: "minimax/minimax-m2.5",
+      authProfileId: "openrouter:default",
+    });
+    expect(result.provider).toBe("openai-codex");
+    expect(result.model).toBe("gpt-5.5");
+    expect(result.authProfileId).toBeUndefined();
   });
 
   it("applies runtime defaults when resolving the effective compaction target", () => {

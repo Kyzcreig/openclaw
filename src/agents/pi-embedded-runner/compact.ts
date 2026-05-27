@@ -318,6 +318,7 @@ export async function compactEmbeddedPiSessionDirect(
   });
   const resolvedCompactionTarget = resolveEmbeddedCompactionTarget({
     config: params.config,
+    sessionKey: params.sessionKey,
     provider: params.provider,
     modelId: params.model,
     authProfileId: params.authProfileId,
