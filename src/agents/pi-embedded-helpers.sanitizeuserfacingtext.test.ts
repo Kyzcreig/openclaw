@@ -20,6 +20,29 @@ describe("sanitizeUserFacingText", () => {
     expect(sanitizeUserFacingText("Hi <final>there</final>!")).toBe("Hi there!");
   });
 
+  it("drops leaked transcript scaffold at the start of a visible reply", () => {
+    expect(sanitizeUserFacingText("User: <system>Tool results:</system>")).toBe("");
+    expect(sanitizeUserFacingText("<system>Tool results:</system>")).toBe("");
+    expect(sanitizeUserFacingText("<tool_result>secret output</tool_result>")).toBe("");
+  });
+
+  it("truncates at leaked transcript scaffold after visible reply text", () => {
+    const input = [
+      "Visible answer.",
+      "",
+      "User: <system>Tool results:</system>",
+      "internal tool output",
+    ].join("\n");
+
+    expect(sanitizeUserFacingText(input)).toBe("Visible answer.");
+  });
+
+  it("keeps ordinary mentions of transcript marker strings", () => {
+    const input = "The literal string `<system>Tool results:</system>` was shown in Discord.";
+
+    expect(sanitizeUserFacingText(input)).toBe(input);
+  });
+
   it.each(["202 results found", "400 days left"])(
     "does not clobber normal numeric prefix: %s",
     (text) => {

@@ -36,6 +36,12 @@ const RATE_LIMIT_ERROR_USER_MESSAGE = "⚠️ API rate limit reached. Please try
 const OVERLOADED_ERROR_USER_MESSAGE =
   "The AI service is temporarily overloaded. Please try again in a moment.";
 const FINAL_TAG_RE = /<\s*\/?\s*final\s*>/gi;
+const ROLE_PREFIXED_TRANSCRIPT_SCAFFOLD_RE =
+  /(^|\n)[ \t]*(?:user|assistant|system|developer|tool)\s*:\s*<\s*\/?\s*(?:system|user|assistant|developer|tool|tool_result|tool_call|tool_results|previous_response)\b[^>]*>/i;
+const RAW_TRANSCRIPT_SCAFFOLD_RE =
+  /(^|\n)[ \t]*<\s*\/?\s*(?:tool_result|tool_call|previous_response)\b[^>]*>/i;
+const SYSTEM_TOOL_RESULTS_SCAFFOLD_RE =
+  /(^|\n)[ \t]*<\s*system\b[^>]*>\s*(?:tool\s+results?|previous\s+response|tool\s+calls?)\b/i;
 const ERROR_PREFIX_RE =
   /^(?:error|(?:[a-z][\w-]*\s+)?api\s*error|openai\s*error|anthropic\s*error|gateway\s*error|codex\s*error|request failed|failed|exception)(?:\s+\d{3})?[:\s-]+/i;
 const CONTEXT_OVERFLOW_ERROR_HEAD_RE =
@@ -328,6 +334,21 @@ function stripFinalTagsFromText(text: unknown): string {
   return normalized.replace(FINAL_TAG_RE, "");
 }
 
+function stripLeakedTranscriptScaffold(text: string): string {
+  const matches = [
+    ROLE_PREFIXED_TRANSCRIPT_SCAFFOLD_RE.exec(text),
+    RAW_TRANSCRIPT_SCAFFOLD_RE.exec(text),
+    SYSTEM_TOOL_RESULTS_SCAFFOLD_RE.exec(text),
+  ].filter((match): match is RegExpExecArray => Boolean(match));
+  if (matches.length === 0) {
+    return text;
+  }
+  const first = matches.reduce((earliest, match) =>
+    match.index < earliest.index ? match : earliest,
+  );
+  return text.slice(0, first.index).trimEnd();
+}
+
 function collapseConsecutiveDuplicateBlocks(text: string): string {
   const trimmed = text.trim();
   if (!trimmed) {
@@ -378,7 +399,9 @@ export function sanitizeUserFacingText(text: unknown, opts?: { errorContext?: bo
     return raw;
   }
   const errorContext = opts?.errorContext ?? false;
-  const stripped = stripInternalRuntimeContext(stripFinalTagsFromText(raw));
+  const stripped = stripLeakedTranscriptScaffold(
+    stripInternalRuntimeContext(stripFinalTagsFromText(raw)),
+  );
   const trimmed = stripped.trim();
   if (!trimmed) {
     return "";
