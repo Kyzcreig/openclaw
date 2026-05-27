@@ -13,7 +13,7 @@ import {
 import type { CodexAppServerClient, CodexServerNotificationHandler } from "./client.js";
 import { resolveCodexAppServerRuntimeOptions } from "./config.js";
 import { isJsonObject, type CodexServerNotification, type JsonObject } from "./protocol.js";
-import { readCodexAppServerBinding } from "./session-binding.js";
+import { clearCodexAppServerBinding, readCodexAppServerBinding } from "./session-binding.js";
 type CodexNativeCompactionCompletion = {
   signal: "thread/compacted" | "item/completed";
   turnId?: string;
@@ -29,6 +29,9 @@ type ContextEngineCompactResult = Awaited<
 >;
 
 const DEFAULT_CODEX_COMPACTION_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
+const NO_CODEX_APP_SERVER_THREAD_BINDING_REASON = "no codex app-server thread binding";
+const STALE_CODEX_APP_SERVER_THREAD_BINDING_REASON =
+  "stale codex app-server thread binding cleared";
 
 let clientFactory = defaultCodexAppServerClientFactory;
 
@@ -102,7 +105,19 @@ export async function maybeCompactCodexAppServerSession(
       result: buildContextEnginePrimaryResult(primary, nativeResult, params.currentTokenCount),
     };
   }
-  return await compactCodexNativeThread(params, options);
+  const nativeResult = await compactCodexNativeThread(params, options);
+  if (isCodexNativeBindingLoss(nativeResult)) {
+    embeddedAgentLog.warn(
+      "codex app-server native compaction unavailable; falling back to transcript compaction",
+      {
+        sessionId: params.sessionId,
+        sessionKey: params.sessionKey,
+        reason: nativeResult?.reason,
+      },
+    );
+    return undefined;
+  }
+  return nativeResult;
 }
 
 async function compactCodexNativeThread(
@@ -112,7 +127,7 @@ async function compactCodexNativeThread(
   const appServer = resolveCodexAppServerRuntimeOptions({ pluginConfig: options.pluginConfig });
   const binding = await readCodexAppServerBinding(params.sessionFile, { config: params.config });
   if (!binding?.threadId) {
-    return { ok: false, compacted: false, reason: "no codex app-server thread binding" };
+    return { ok: false, compacted: false, reason: NO_CODEX_APP_SERVER_THREAD_BINDING_REASON };
   }
   const requestedAuthProfileId = params.authProfileId?.trim() || undefined;
   if (
@@ -143,6 +158,20 @@ async function compactCodexNativeThread(
     completion = await waiter.promise;
   } catch (error) {
     waiter.cancel();
+    if (isStaleCodexThreadError(error)) {
+      await clearCodexAppServerBinding(params.sessionFile);
+      embeddedAgentLog.warn("cleared stale codex app-server binding during native compaction", {
+        sessionId: params.sessionId,
+        sessionKey: params.sessionKey,
+        threadId: binding.threadId,
+        error: formatCompactionError(error),
+      });
+      return {
+        ok: false,
+        compacted: false,
+        reason: STALE_CODEX_APP_SERVER_THREAD_BINDING_REASON,
+      };
+    }
     return {
       ok: false,
       compacted: false,
@@ -173,6 +202,19 @@ async function compactCodexNativeThread(
       },
     },
   };
+}
+
+function isCodexNativeBindingLoss(result: EmbeddedPiCompactResult | undefined): boolean {
+  return (
+    result?.ok === false &&
+    result.compacted === false &&
+    (result.reason === NO_CODEX_APP_SERVER_THREAD_BINDING_REASON ||
+      result.reason === STALE_CODEX_APP_SERVER_THREAD_BINDING_REASON)
+  );
+}
+
+function isStaleCodexThreadError(error: unknown): boolean {
+  return /\bthread not found:/iu.test(formatCompactionError(error));
 }
 
 function mergeCompactionDetails(

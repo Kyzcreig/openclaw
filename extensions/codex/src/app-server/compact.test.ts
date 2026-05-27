@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodexAppServerClient } from "./client.js";
 import { maybeCompactCodexAppServerSession, __testing } from "./compact.js";
 import type { CodexServerNotification } from "./protocol.js";
-import { writeCodexAppServerBinding } from "./session-binding.js";
+import { resolveCodexAppServerBindingPath, writeCodexAppServerBinding } from "./session-binding.js";
 
 let tempDir: string;
 
@@ -159,6 +159,41 @@ describe("maybeCompactCodexAppServerSession", () => {
       reason: "auth profile mismatch for session binding",
     });
     expect(factory).not.toHaveBeenCalled();
+  });
+
+  it("falls back to transcript compaction when the native binding is missing", async () => {
+    const factory = vi.fn(async () => createFakeCodexClient().client);
+    __testing.setCodexAppServerClientFactoryForTests(factory);
+
+    const result = await maybeCompactCodexAppServerSession({
+      sessionId: "session-1",
+      sessionKey: "agent:main:session-1",
+      sessionFile: path.join(tempDir, "missing-binding.jsonl"),
+      workspaceDir: tempDir,
+    });
+
+    expect(result).toBeUndefined();
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it("clears stale native bindings and falls back to transcript compaction", async () => {
+    const fake = createFakeCodexClient();
+    fake.request.mockRejectedValueOnce(new Error("thread not found: thread-1"));
+    __testing.setCodexAppServerClientFactoryForTests(async () => fake.client);
+    const sessionFile = await writeTestBinding();
+
+    const result = await maybeCompactCodexAppServerSession({
+      sessionId: "session-1",
+      sessionKey: "agent:main:session-1",
+      sessionFile,
+      workspaceDir: tempDir,
+    });
+
+    expect(result).toBeUndefined();
+    await expect(fs.stat(resolveCodexAppServerBindingPath(sessionFile))).rejects.toHaveProperty(
+      "code",
+      "ENOENT",
+    );
   });
 
   it("prefers owning context-engine compaction and records native status separately", async () => {
